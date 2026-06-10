@@ -125,12 +125,20 @@ print(picat("main => println(fib(10)).\nfib(0)=1.\nfib(1)=1.\nfib(N)=fib(N-1)+fi
   `crb rm picat && crb deploy picat.yml`.
 - **Named sessions, shared execution** (picatd's `pic -n` model): pass a
   session name and you get a separate live engine with separate state, booted
-  on first use, executing CONCURRENTLY with every other session:
-  `crb invoke picat run ... -s alice`, or from a script
-  `picat("program", "alice")`. Reset one with `crb reset picat -s alice`
-  (script: `picat.reset("alice")`). Omitting the name uses `main`. For
-  spreading load across WORKERS, deploy the same wasm under more names
+  on first use, executing CONCURRENTLY with every other session. From a
+  script: `picat("program", "alice")`; reset one with `picat.reset("alice")`.
+  Omitting the name uses `main`. NOTE: an invoke body must be a complete
+  program that defines `main` - a bare goal gives
+  `existence_error(procedure, main/0)`; wrap it: `main => <goal>.`
+  For spreading load across WORKERS, deploy the same wasm under more names
   (`picat2.yml`) - sessions share their workload's slot and computer.
+- **Try the concurrency demo**: fetch `alice.lua` and `bob.lua` from the
+  release. Warm both once (`alice 5`, `bob`), then run `alice` (slow naive
+  fib in session 'alice') and, while she solves, `bob` from another computer
+  or multishell tab - he answers in seconds. The gateway monitor shows both
+  sessions live: BUSY/idle, queue depth, and a red `[X]` per session that
+  cancels it on touch (in-flight callers get a 'cancelled from dashboard'
+  error; the next invoke boots that session fresh).
 - **Placement is the gateway's job.** The workload may land on any worker
   with a free disk; its files (programs, anything it writes) live on that
   floppy and survive reboots. `crb ls` shows where everything is.
@@ -152,10 +160,12 @@ crb purge            -- remove everything
 crb update           -- roll worker.lua to every worker, then the gateway
 ```
 
-The gateway dashboard (any attached monitor) shows live state: workloads with
-placement and color-coded health, per-slot detail (`/disk picat picat.wasm`),
-worker versions, and the reconciler's log — deploys, adoptions after reboots,
-failed assigns with reasons, GC of duplicates.
+The gateway dashboard (any attached monitor) shows live state in two columns:
+left - workloads with placement and color-coded health, per-slot detail
+(`/disk picat picat.wasm 5.4MB`), worker versions, total storage used, and
+the reconciler's log (deploys, adoptions after reboots, failed assigns with
+reasons, GC of duplicates); right - every live SESSION with BUSY/idle state
+and queue depth, each with a touch `[X]` to cancel it.
 
 ## Why trust the orchestration?
 

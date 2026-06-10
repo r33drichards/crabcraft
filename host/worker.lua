@@ -143,8 +143,22 @@ end
 local function slot_list()
   local out = {}
   for sname, s in pairs(slots) do
+    local sess
+    if s.meta and s.meta.kind == "session" and s.sessions then
+      sess = {}
+      local seen = {}
+      for nm in pairs(s.sessions) do seen[nm] = true end
+      for nm in pairs(s.sessq or {}) do seen[nm] = true end
+      for nm in pairs(seen) do
+        local q = s.sessq and s.sessq[nm]
+        sess[#sess + 1] = { name = nm,
+          busy = (q and (q.busy or #q.jobs > 0)) or false,
+          queued = q and #q.jobs or 0,
+          booted = s.sessions[nm] ~= nil }
+      end
+    end
     out[#out + 1] = { disk = sname, workload = s.meta and s.meta.name or nil,
-      used = slot_used(s.dir),
+      used = slot_used(s.dir), sessions = sess,
       state = s.meta and ((s.w or s.sessions or (s.meta.kind == "command" and s.module)) and "running" or "loading") or nil }
   end
   return out
@@ -304,7 +318,12 @@ end
 
 -- ---- tasks ----------------------------------------------------------------------
 local tasks = {}
-local function spawn(fn) tasks[#tasks + 1] = { co = coroutine.create(fn) } end
+local function spawn(fn, tag) tasks[#tasks + 1] = { co = coroutine.create(fn), tag = tag } end
+local function kill_task(tag)
+  for _, t in ipairs(tasks) do
+    if t.tag == tag then t.dead = true end
+  end
+end
 
 -- ---- shared execution for session workloads (picatd's model) -----------------
 -- Each named session gets its own queue + coroutine: a long solve in session
@@ -319,6 +338,8 @@ local function session_task(s, sname2)
         os.pullEvent("crab_work")
       else
         local job = table.remove(q.jobs, 1)
+        q.busy = true
+        q.current = job
         local m = job.msg
         local reply
         if m.reset then
@@ -352,6 +373,8 @@ local function session_task(s, sname2)
         end
         rednet.send(job.sender, { type = "invoke-reply", id = m.id,
           ok = reply.ok, result = reply.result, err = reply.err }, PROTO)
+        q.busy = false
+        q.current = nil
       end
     end
   end
@@ -362,7 +385,7 @@ local function route_session_invoke(s, job)
   s.sessq = s.sessq or {}
   if not s.sessq[sname2] then
     s.sessq[sname2] = { jobs = {} }
-    spawn(session_task(s, sname2))
+    spawn(session_task(s, sname2), "sess:" .. (s.meta and s.meta.name or "?") .. ":" .. sname2)
   end
   local q = s.sessq[sname2].jobs
   q[#q + 1] = job
@@ -400,6 +423,30 @@ spawn(function() -- receiver
       elseif msg.type == "invoke-reply" or (msg.id and tostring(msg.id):match("^mesh:") and msg.ok ~= nil) then
         mesh_replies[msg.id] = msg
         os.queueEvent("crab_mesh")
+      elseif msg.type == "cancel-session" then
+        for _, s in pairs(slots) do
+          if s.meta and s.meta.name == msg.name and s.sessions then
+            local nm = msg.session or "main"
+            kill_task("sess:" .. msg.name .. ":" .. nm)
+            local q = s.sessq and s.sessq[nm]
+            if q then
+              if q.current then
+                rednet.send(q.current.sender, { type = "invoke-reply", id = q.current.msg.id,
+                  ok = false, err = "cancelled from dashboard" }, PROTO)
+              end
+              for _, j in ipairs(q.jobs) do
+                rednet.send(j.sender, { type = "invoke-reply", id = j.msg.id,
+                  ok = false, err = "cancelled from dashboard" }, PROTO)
+              end
+              s.sessq[nm] = nil
+            end
+            local eng = s.sessions[nm]
+            if eng then pcall(function() eng:close() end) end
+            s.sessions[nm] = nil
+            print(("worker: session '%s' of '%s' cancelled"):format(nm, msg.name))
+            rednet.send(gw, { type = "heartbeat", worker = label, slots = slot_list(), version = CRAB_VERSION }, PROTO)
+          end
+        end
       elseif msg.type == "assign" or msg.type == "invoke" or msg.type == "drain" then
         local s = find_slot_for(msg)
         if s then
@@ -476,7 +523,9 @@ local ev = {}
 while true do
   for i = #tasks, 1, -1 do
     local t = tasks[i]
-    if t.filter == nil or t.filter == ev[1] or ev[1] == "terminate" then
+    if t.dead then
+      table.remove(tasks, i)
+    elseif t.filter == nil or t.filter == ev[1] or ev[1] == "terminate" then
       local ok, f = coroutine.resume(t.co, (table.unpack or unpack)(ev))
       if not ok then print("worker task error: " .. tostring(f)); table.remove(tasks, i)
       elseif coroutine.status(t.co) == "dead" then table.remove(tasks, i)

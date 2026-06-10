@@ -49,6 +49,7 @@ local started = os.clock()
 -- ---- monitor dashboard ---------------------------------------------------------
 local mon = (type(peripheral) == "table" and peripheral.find) and peripheral.find("monitor") or nil
 local LOG = {}
+local buttons = {} -- { {y, x1, x2, worker, wl, sess}, ... } rebuilt each draw
 local draw -- fwd
 
 local function dlog(msg)
@@ -78,14 +79,51 @@ draw = function()
   local function c(fg) if colour then mon.setTextColour(fg) end end
   mon.setBackgroundColour(colours.black)
   mon.clear()
+  local LW = math.max(40, math.floor(W * 0.62)) -- left column width
   local y = 1
   local function line(txt, fg)
     if y > H then return end
     mon.setCursorPos(1, y)
     c(fg or colours.white)
-    mon.write(txt:sub(1, W))
+    mon.write(txt:sub(1, LW))
     y = y + 1
   end
+  -- right column: session debug + [X] cancel buttons (touch)
+  buttons = {}
+  local ry = 1
+  local rx = LW + 2
+  local function rline(txt, fg)
+    if ry > H or rx > W then return end
+    mon.setCursorPos(rx, ry)
+    c(fg or colours.white)
+    mon.write(txt:sub(1, W - rx + 1))
+    ry = ry + 1
+  end
+  rline("SESSIONS", colours.lightBlue)
+  for wid, w in pairs(workers) do
+    for slot, sess in pairs(w.sessions or {}) do
+      local wl = w.slots[slot]
+      if sess and wl and #sess > 0 then
+        rline(("%s @ worker %d"):format(tostring(wl), wid), colours.yellow)
+        for _, e in ipairs(sess) do
+          local state = e.busy and "BUSY" or (e.booted and "idle" or "boot")
+          local lbl = ("  %-10s %-4s q%-2d"):format(e.name, state, e.queued or 0)
+          local fg = e.busy and colours.orange or colours.lime
+          if ry <= H and rx + #lbl + 4 <= W then
+            mon.setCursorPos(rx, ry)
+            c(fg)
+            mon.write(lbl)
+            c(colours.red)
+            mon.write(" [X]")
+            buttons[#buttons + 1] = { y = ry, x1 = rx + #lbl + 1, x2 = rx + #lbl + 3,
+              worker = wid, wl = wl, sess = e.name }
+            ry = ry + 1
+          end
+        end
+      end
+    end
+  end
+  if #buttons == 0 then rline("  (none active)", colours.grey) end
   local nworkers, inflight_n, used_total = 0, 0, 0
   for _, w in pairs(workers) do
     nworkers = nworkers + 1
@@ -287,10 +325,12 @@ local function handle(sender, msg)
       if msg.version then w.version = msg.version end
       w.states = w.states or {}
       w.used = w.used or {}
+      w.sessions = w.sessions or {}
       for _, s in ipairs(msg.slots or {}) do
         w.slots[s.disk] = s.workload or false
         w.states[s.disk] = s.state
         w.used[s.disk] = s.used
+        w.sessions[s.disk] = s.sessions
       end
       for wname, p in pairs(placements) do
         if p.worker == sender then
@@ -440,6 +480,18 @@ spawn(function()
       if not ok then
         dlog("handler error: " .. tostring(err))
         if msg.id then respond(sender, { ok = false, err = "gateway error: " .. tostring(err) }, msg.id) end
+      end
+    end
+  end
+end)
+
+spawn(function() -- dashboard touch: cancel sessions
+  while true do
+    local _, _, x, ty = os.pullEvent("monitor_touch")
+    for _, b in ipairs(buttons) do
+      if ty == b.y and x >= b.x1 and x <= b.x2 then
+        dlog(("dashboard: cancelling session '%s' of '%s' on worker %d"):format(b.sess, b.wl, b.worker))
+        rednet.send(b.worker, { type = "cancel-session", name = b.wl, session = b.sess }, PROTO)
       end
     end
   end
