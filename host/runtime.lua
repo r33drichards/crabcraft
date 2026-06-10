@@ -48,7 +48,7 @@ end
 function M.load_reactor(bytes, opts)
   opts = opts or {}
   local wc = engine()
-  local module = wc.load(bytes)
+  local module = opts.module or wc.load(bytes)
   local hostfs = (wc.hostfs and wc.hostfs(opts.root or ".")) or nil
   local host = wc.wasi.make({
     fs = hostfs, root = opts.root or ".",
@@ -86,7 +86,8 @@ function M.load_reactor(bytes, opts)
       return { ptr }
     end,
   }
-  inst = wc.instantiate(module, imports, { mode = opts.mode or "transpile" })
+  inst = wc.instantiate(module, imports,
+    { mode = opts.mode or "transpile", chunk_cache = opts.chunk_cache })
   -- reactor init if present
   pcall(function() inst:call("_initialize") end)
 
@@ -142,7 +143,7 @@ function M.run_command(bytes, body, opts)
     writeerr = function(s) out[#out + 1] = s end,
   })
   local inst = wc.instantiate(module, { wasi_snapshot_preview1 = host },
-    { mode = opts.mode or "transpile" })
+    { mode = opts.mode or "transpile", chunk_cache = opts.chunk_cache })
   local ok, err = pcall(function() inst:call("_start") end)
   if not ok and not (type(err) == "table" and err[wc.wasi.EXIT]) then
     return nil, "guest trap: " .. tostring(err)

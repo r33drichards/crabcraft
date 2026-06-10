@@ -1,0 +1,3 @@
+0
+449 41500060 1000000000 873d36364000cd4035b09cfaadc27cba 1 libc/wasi/libc-bottom-half/sources/__wasilibc_environ.c
+1292 41493364 1000000000 73fa1620fd6c5ce59cfbb9dd362d0f37 1 libc/include/wasm-wasi-musl/wasi/libc-environ.h

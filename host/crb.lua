@@ -42,7 +42,7 @@ if cmd == "deploy" then
   local file = assert(args[2], "crb deploy <file.yml>")
   local m = yaml.decode(assert(readfile(file), "manifest not found: " .. file))
   assert(m.name and (m.wasm or m.url), "manifest needs name + wasm")
-  local spec = { name = m.name, wasm = m.wasm or m.url, kind = m.kind or "reactor" }
+  local spec = { name = m.name, wasm = m.wasm or m.url, kind = m.kind or "reactor", warm = m.warm }
   if m.schema then spec.schema = fetch(m.schema) end
   local C = client.connect(args[3])
   local r = C:deploy(spec)

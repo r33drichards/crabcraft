@@ -84,7 +84,7 @@ local function reconcile()
         workers[wid].slots[slot] = wname -- optimistic; heartbeat confirms
         dlog(("reconcile: assigning '%s' -> worker %d slot %s"):format(wname, wid, slot))
         rednet.send(wid, { type = "assign", slot = slot, name = wname,
-          url = spec.url, kind = spec.kind, id = "asg:" .. wname }, PROTO)
+          url = spec.url, kind = spec.kind, warm = spec.warm, id = "asg:" .. wname }, PROTO)
       end
     end
   end
@@ -143,7 +143,7 @@ local function handle(sender, msg)
       respond(sender, { ok = false, err = "deploy needs name and url" }, msg.id)
       return
     end
-    registry[msg.name] = { url = msg.url, kind = msg.kind or "reactor", schema = msg.schema }
+    registry[msg.name] = { url = msg.url, kind = msg.kind or "reactor", schema = msg.schema, warm = msg.warm }
     dlog(("deploy '%s' (%s) registered"):format(msg.name, msg.kind or "reactor"))
     respond(sender, { ok = true, output = "registered " .. msg.name }, msg.id)
     reconcile()

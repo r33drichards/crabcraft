@@ -1,0 +1,3 @@
+name: hello-js
+wasm: https://github.com/r33drichards/crabcraft/releases/latest/download/hello-js.wasm
+kind: command

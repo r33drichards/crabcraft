@@ -29,6 +29,8 @@ HELLO_WASM = slurp("modules/hello.wasm", binary=True)
 HELLO_SCHEMA = slurp("wit/hello.json")
 CALLER_WASM = slurp("modules/caller.wasm", binary=True) if os.path.exists("modules/caller.wasm") else None
 CALLER_SCHEMA = slurp("wit/caller.json") if os.path.exists("wit/caller.json") else None
+SQLITE_WASM = slurp("modules/sqlite.wasm", binary=True) if os.path.exists("modules/sqlite.wasm") else None
+SQLITE_SCHEMA = slurp("wit/sqlite.json") if os.path.exists("wit/sqlite.json") else None
 GO_WASM = slurp("modules/hello-go.wasm", binary=True) if os.path.exists("modules/hello-go.wasm") else None
 GO_SCHEMA = slurp("wit/hello-go.json") if os.path.exists("wit/hello-go.json") else None
 JS_WASM = slurp("modules/hello-js.wasm", binary=True) if os.path.exists("modules/hello-js.wasm") else None
@@ -111,6 +113,8 @@ def worker_prog(label):
         bins["caller.wasm"] = CALLER_WASM
     if GO_WASM and label == "w1":
         bins["hello-go.wasm"] = GO_WASM
+    if SQLITE_WASM and label == "w1":
+        bins["sqlite.wasm"] = SQLITE_WASM
     if JS_WASM and label == "w2":
         bins["hello-js.wasm"] = JS_WASM
     return f"""periphemu.create('back','modem',NET,true)
@@ -122,7 +126,7 @@ emit('{label}: starting')
 local fn, lerr = loadfile('worker')
 if not fn then emit('{label} PARSE: ' .. tostring(lerr)) return end
 if setfenv then setfenv(fn, getfenv(1)) end
-local ok, err = pcall(fn, 'gw', '--slots', '2')
+local ok, err = pcall(fn, 'gw', '--slots', '3')
 emit('{label} EXITED: ' .. tostring(ok) .. ' ' .. tostring(err))
 """
 
@@ -140,6 +144,24 @@ wait_running('caller')
 local relay = C:workload('caller')
 local viamesh = relay['greet-via']({{ target = 'hello', name = 'mesh' }})
 emit('mesh: ' .. tostring(viamesh))
+"""
+
+sqlite_test = ""
+if SQLITE_WASM:
+    sqlite_test = f"""
+-- C LANE + DISK PERSISTENCE: sqlite as a workload, db on the worker's volume
+r = C:deploy({{ name = 'sqlite', wasm = 'file:sqlite.wasm', kind = 'reactor',
+  schema = {lua_str(SQLITE_SCHEMA)} }})
+emit('deploy sqlite: ' .. tostring(r.ok))
+wait_running('sqlite')
+local db = C:workload('sqlite')
+local r1 = db.exec({{ sql = "CREATE TABLE pets(name,kind)" }})
+local r2 = db.exec({{ sql = "INSERT INTO pets VALUES('ferris','crab'),('gopher','rodent')" }})
+local r3 = db.exec({{ sql = "SELECT name FROM pets ORDER BY name" }})
+emit('sqlite create ok: ' .. tostring(r1.is_ok == true))
+emit('sqlite select: ' .. tostring(r3.is_ok and r3.ok))
+local r4 = db.exec({{ sql = "NOT SQL" }})
+emit('sqlite bad sql errs: ' .. tostring(r4.is_err == true))
 """
 
 go_test = ""
@@ -197,6 +219,7 @@ local hello = C:workload('hello')
 emit('greet: ' .. tostring(hello.greet({{ name = 'crab', excited = true }})))
 emit('add: ' .. tostring(hello.add({{ a = 40, b = 2 }})))
 {caller_test}
+{sqlite_test}
 {go_test}
 {js_test}
 -- cluster state for the record
@@ -283,6 +306,9 @@ if CALLER_WASM:
     checks.append(("cross-module mesh call", "mesh: via mesh: Hello, mesh!" in client_out))
 if GO_WASM:
     checks.append(("Go reactor lane", "go greet: Hello from Go, gopher!!!" in client_out))
+if SQLITE_WASM:
+    checks.append(("SQLite C lane + volume", '"rows":[["ferris"],["gopher"]]' in client_out
+                   and "sqlite bad sql errs: true" in client_out))
 if JS_WASM:
     checks.append(("JS command lane", "js greet: Hello from JS, quickjs!" in client_out))
 

@@ -804,7 +804,7 @@ function M.connect(gwname, opts)
   -- raw operations
   function C:list() return self:request({ type = "list" }) end
   function C:deploy(spec) return self:request({ type = "deploy", name = spec.name,
-    url = spec.wasm or spec.url, kind = spec.kind, schema = spec.schema }) end
+    url = spec.wasm or spec.url, kind = spec.kind, schema = spec.schema, warm = spec.warm }) end
   function C:remove(name) return self:request({ type = "remove", name = name }) end
   function C:schema(name)
     local r = self:request({ type = "schema", name = name })
@@ -913,7 +913,7 @@ if cmd == "deploy" then
   local file = assert(args[2], "crb deploy <file.yml>")
   local m = yaml.decode(assert(readfile(file), "manifest not found: " .. file))
   assert(m.name and (m.wasm or m.url), "manifest needs name + wasm")
-  local spec = { name = m.name, wasm = m.wasm or m.url, kind = m.kind or "reactor" }
+  local spec = { name = m.name, wasm = m.wasm or m.url, kind = m.kind or "reactor", warm = m.warm }
   if m.schema then spec.schema = fetch(m.schema) end
   local C = client.connect(args[3])
   local r = C:deploy(spec)

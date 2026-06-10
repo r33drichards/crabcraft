@@ -1,0 +1,2 @@
+0
+635 41500024 1000000000 36e9a7387cf5bcea493a894e819efe92 1 libc/wasi/libc-bottom-half/crt/crt1-reactor.c

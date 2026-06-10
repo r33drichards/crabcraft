@@ -1,0 +1,4 @@
+name: hello
+wasm: https://github.com/r33drichards/crabcraft/releases/latest/download/hello.wasm
+kind: reactor
+schema: https://github.com/r33drichards/crabcraft/releases/latest/download/hello.json

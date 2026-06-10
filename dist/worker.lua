@@ -740,7 +740,7 @@ end
 function M.load_reactor(bytes, opts)
   opts = opts or {}
   local wc = engine()
-  local module = wc.load(bytes)
+  local module = opts.module or wc.load(bytes)
   local hostfs = (wc.hostfs and wc.hostfs(opts.root or ".")) or nil
   local host = wc.wasi.make({
     fs = hostfs, root = opts.root or ".",
@@ -778,7 +778,8 @@ function M.load_reactor(bytes, opts)
       return { ptr }
     end,
   }
-  inst = wc.instantiate(module, imports, { mode = opts.mode or "transpile" })
+  inst = wc.instantiate(module, imports,
+    { mode = opts.mode or "transpile", chunk_cache = opts.chunk_cache })
   -- reactor init if present
   pcall(function() inst:call("_initialize") end)
 
@@ -834,7 +835,7 @@ function M.run_command(bytes, body, opts)
     writeerr = function(s) out[#out + 1] = s end,
   })
   local inst = wc.instantiate(module, { wasi_snapshot_preview1 = host },
-    { mode = opts.mode or "transpile" })
+    { mode = opts.mode or "transpile", chunk_cache = opts.chunk_cache })
   local ok, err = pcall(function() inst:call("_start") end)
   if not ok and not (type(err) == "table" and err[wc.wasi.EXIT]) then
     return nil, "guest trap: " .. tostring(err)
@@ -1001,13 +1002,25 @@ local function start_slot(sname)
   if not s.meta then return end
   local wasm = readfile(s.dir .. "/workload.wasm")
   if not wasm then print("worker: slot " .. sname .. " missing workload.wasm"); s.meta = nil; return end
+  -- TRANSPILE AT DEPLOY: the whole module is compiled here, once; every
+  -- request (and every command-kind re-instantiate) is served from the cache.
+  -- warm: false in the manifest skips it (functions then compile on first use).
+  local wc = rt.engine()
+  s.module = wc.load(wasm)
+  s.cache = {}
+  if s.meta.warm ~= false and wc.precompile_cache then
+    local t0 = os.clock()
+    local cache, n, fb = wc.precompile_cache(s.module, "transpile")
+    s.cache = cache
+    print(("worker: '%s' transpiled %d fns%s in %s (%.1fs)"):format(s.meta.name, n,
+      fb > 0 and (" (" .. fb .. " interp)") or "", sname, os.clock() - t0))
+  end
   if s.meta.kind == "command" then
-    s.module = rt.engine().load(wasm) -- decode once; _start per invoke
     print(("worker: '%s' (command) ready in %s"):format(s.meta.name, sname))
   else
     local t0 = os.clock()
     s.w = rt.load_reactor(wasm, { mode = "transpile", root = s.dir, name = s.meta.name,
-      call = mesh_call })
+      call = mesh_call, chunk_cache = s.cache, module = s.module })
     print(("worker: '%s' (reactor) warm in %s (%.1fs)"):format(s.meta.name, sname, os.clock() - t0))
   end
 end
@@ -1028,7 +1041,8 @@ local function assign(msg)
     r.close()
   end
   writefile(s.dir .. "/workload.wasm", wasm)
-  s.meta = { name = msg.name, kind = msg.kind or "reactor", url = msg.url }
+  s.meta = { name = msg.name, kind = msg.kind or "reactor", url = msg.url, warm = msg.warm }
+  s.cache = {} -- new workload, fresh transpile cache
   writefile(s.dir .. "/crab-meta.json", json.encode(s.meta))
   s.w, s.module = nil, nil
   local ok, err = pcall(start_slot, msg.slot)
@@ -1057,7 +1071,7 @@ local function do_invoke(msg)
   if not s then return { ok = false, err = "workload not here: " .. tostring(msg.name) } end
   if s.meta.kind == "command" then
     local out, err = rt.run_command(nil, msg.body or "", { module = s.module, root = s.dir,
-      name = s.meta.name, mode = "transpile" })
+      name = s.meta.name, mode = "transpile", chunk_cache = s.cache })
     if not out then return { ok = false, err = err } end
     return { ok = true, result = out }
   end
@@ -1069,7 +1083,16 @@ end
 -- ---- tasks ----------------------------------------------------------------------
 local tasks = {}
 local function spawn(fn) tasks[#tasks + 1] = { co = coroutine.create(fn) } end
-local jobs = {} -- queued assigns/invokes
+
+-- PER-SLOT queues + coroutines (the picatd lesson): a workload blocked on a
+-- mesh call must not starve other workloads on the same computer - otherwise
+-- two co-located services calling each other deadlock.
+local function find_slot_for(msg)
+  if msg.type == "assign" or msg.type == "drain" then return slots[msg.slot] end
+  for _, s in pairs(slots) do
+    if s.meta and s.meta.name == msg.name then return s end
+  end
+end
 
 spawn(function() -- receiver
   while true do
@@ -1079,46 +1102,61 @@ spawn(function() -- receiver
         mesh_replies[msg.id] = msg
         os.queueEvent("crab_mesh")
       elseif msg.type == "assign" or msg.type == "invoke" or msg.type == "drain" then
-        jobs[#jobs + 1] = { sender = sender, msg = msg }
-        os.queueEvent("crab_work")
+        local s = find_slot_for(msg)
+        if s then
+          s.queue[#s.queue + 1] = { sender = sender, msg = msg }
+          os.queueEvent("crab_work")
+        elseif msg.type == "invoke" then
+          rednet.send(sender, { type = "invoke-reply", id = msg.id,
+            ok = false, err = "workload not here: " .. tostring(msg.name) }, PROTO)
+        elseif msg.id then
+          rednet.send(sender, { ok = false, err = "no slot " .. tostring(msg.slot), id = msg.id }, PROTO)
+        end
       end
     end
   end
 end)
 
-spawn(function() -- worker loop
-  -- boot recovery: restart whatever the disks already hold
+local function slot_task(sname, s)
+  return function()
+    while true do
+      if #s.queue == 0 then
+        os.pullEvent("crab_work")
+      else
+        local job = table.remove(s.queue, 1)
+        local m = job.msg
+        if m.type == "assign" then
+          local r = assign(m)
+          r.id = m.id
+          rednet.send(job.sender, r, PROTO)
+          rednet.send(gw, { type = "heartbeat", worker = label, slots = slot_list() }, PROTO)
+        elseif m.type == "drain" then
+          drain(m)
+          rednet.send(gw, { type = "heartbeat", worker = label, slots = slot_list() }, PROTO)
+        elseif m.type == "invoke" then
+          local ok, r = pcall(do_invoke, m)
+          if not ok then r = { ok = false, err = "worker error: " .. tostring(r) } end
+          rednet.send(job.sender, { type = "invoke-reply", id = m.id,
+            ok = r.ok, result = r.result, err = r.err }, PROTO)
+        end
+      end
+    end
+  end
+end
+
+spawn(function() -- boot: recover disks, register, then idle
   for sname, s in pairs(slots) do
     if s.meta then
       local ok, err = pcall(start_slot, sname)
       if not ok then print("worker: recover " .. sname .. " failed: " .. tostring(err)) end
     end
   end
-  -- register
   rednet.send(gw, { type = "register", worker = label, slots = slot_list(), id = "reg" }, PROTO)
-  while true do
-    if #jobs == 0 then
-      os.pullEvent("crab_work")
-    else
-      local job = table.remove(jobs, 1)
-      local m = job.msg
-      if m.type == "assign" then
-        local r = assign(m)
-        r.id = m.id
-        rednet.send(job.sender, r, PROTO)
-        rednet.send(gw, { type = "heartbeat", worker = label, slots = slot_list() }, PROTO)
-      elseif m.type == "drain" then
-        drain(m)
-        rednet.send(gw, { type = "heartbeat", worker = label, slots = slot_list() }, PROTO)
-      elseif m.type == "invoke" then
-        local ok, r = pcall(do_invoke, m)
-        if not ok then r = { ok = false, err = "worker error: " .. tostring(r) } end
-        rednet.send(job.sender, { type = "invoke-reply", id = m.id,
-          ok = r.ok, result = r.result, err = r.err }, PROTO)
-      end
-    end
-  end
 end)
+
+for sname, s in pairs(slots) do
+  spawn(slot_task(sname, s))
+end
 
 spawn(function() -- heartbeat
   while true do
