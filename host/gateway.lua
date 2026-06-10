@@ -26,6 +26,7 @@ local registry = {}   -- name -> { url, kind, schema }
 local workers = {}    -- wid -> { label, slots = { [slot] = workload|false }, last }
 local placements = {} -- name -> { worker = wid, slot = s, state = "assigning"|"running" }
 local inflight = {}   -- reqid -> { from = senderid, t = clock }
+local cooldown = {}   -- wname -> { [wid] = clock of last assign failure }
 local started = os.clock()
 
 local function dlog(msg) print(("[%6ds] %s"):format(os.clock() - started, msg)) end
@@ -40,9 +41,10 @@ local function find_placement_worker(wname)
   return p and p.worker, p and p.slot
 end
 
-local function free_slot()
+local function free_slot(wname)
+  local cd = cooldown[wname] or {}
   for wid, w in pairs(workers) do
-    if os.clock() - w.last < 20 then
+    if os.clock() - w.last < 20 and (not cd[wid] or os.clock() - cd[wid] > 60) then
       for slot, wl in pairs(w.slots) do
         if wl == false then return wid, slot end
       end
@@ -55,24 +57,33 @@ local tasks = {}
 local function spawn(fn) tasks[#tasks + 1] = { co = coroutine.create(fn) } end
 
 local function reconcile()
-  -- drop placements on dead workers
+  -- drop placements on dead workers, and assignments that never converged
+  -- (e.g. the worker failed the fetch): the heartbeat is the source of truth
   for wname, p in pairs(placements) do
     local w = workers[p.worker]
     if not w or os.clock() - w.last > 20 then
       dlog(("reconcile: worker %s lost - unplacing '%s'"):format(tostring(p.worker), wname))
       placements[wname] = nil
+    elseif p.state == "assigning" then
+      p.age = (p.age or 0) + 1
+      if p.age > 3 and w.slots[p.slot] ~= wname then
+        dlog(("reconcile: '%s' never started on worker %d - retrying elsewhere"):format(wname, p.worker))
+        cooldown[wname] = cooldown[wname] or {}
+        cooldown[wname][p.worker] = os.clock()
+        placements[wname] = nil
+      end
     end
   end
   -- place unplaced workloads
   for wname, spec in pairs(registry) do
     if not placements[wname] then
-      local wid, slot = free_slot()
+      local wid, slot = free_slot(wname)
       if wid then
         placements[wname] = { worker = wid, slot = slot, state = "assigning" }
         workers[wid].slots[slot] = wname -- optimistic; heartbeat confirms
         dlog(("reconcile: assigning '%s' -> worker %d slot %s"):format(wname, wid, slot))
         rednet.send(wid, { type = "assign", slot = slot, name = wname,
-          url = spec.url, kind = spec.kind }, PROTO)
+          url = spec.url, kind = spec.kind, id = "asg:" .. wname }, PROTO)
       end
     end
   end
@@ -174,6 +185,19 @@ local function handle(sender, msg)
     inflight[msg.id] = { from = sender, t = os.clock() }
     rednet.send(wid, { type = "invoke", id = msg.id, name = msg.name,
       func = msg.func, params = msg.params, body = msg.body }, PROTO)
+  elseif msg.id and tostring(msg.id):match("^asg:") and msg.ok ~= nil then
+    local wname = tostring(msg.id):sub(5)
+    if msg.ok == false then
+      dlog(("assign '%s' FAILED on worker %d: %s"):format(wname, sender, tostring(msg.err)))
+      cooldown[wname] = cooldown[wname] or {}
+      cooldown[wname][sender] = os.clock()
+      local p = placements[wname]
+      if p and p.worker == sender then
+        if workers[sender] then workers[sender].slots[p.slot] = false end
+        placements[wname] = nil
+      end
+      reconcile()
+    end
   elseif t == "invoke-reply" then
     local e = inflight[msg.id]
     if e then

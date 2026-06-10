@@ -29,6 +29,9 @@ HELLO_WASM = slurp("modules/hello.wasm", binary=True)
 HELLO_SCHEMA = slurp("wit/hello.json")
 CALLER_WASM = slurp("modules/caller.wasm", binary=True) if os.path.exists("modules/caller.wasm") else None
 CALLER_SCHEMA = slurp("wit/caller.json") if os.path.exists("wit/caller.json") else None
+GO_WASM = slurp("modules/hello-go.wasm", binary=True) if os.path.exists("modules/hello-go.wasm") else None
+GO_SCHEMA = slurp("wit/hello-go.json") if os.path.exists("wit/hello-go.json") else None
+JS_WASM = slurp("modules/hello-js.wasm", binary=True) if os.path.exists("modules/hello-js.wasm") else None
 
 B64 = '''
 local function b64dec(data)
@@ -57,29 +60,70 @@ def write_files_lua(files, binaries):
         out.append(f"do local h = fs.open({lua_str(name)}, 'wb') h.write(b64dec({lua_str(b64)})) h.close() end")
     return "\n".join(out)
 
+
+PRELUDE = """
+do
+  local oldprint = print
+  print = function(...)
+    local p = {}
+    for i = 1, select('#', ...) do p[i] = tostring(select(i, ...)) end
+    pcall(emit, table.concat(p, ' '))
+    oldprint(...)
+  end
+end
+"""
+
+def amalgamate(body, libs):
+    """Inline lib sources with a local require shim; libs = {name: source}."""
+    parts = [PRELUDE, "local preload, loaded = {}, {}",
+             "local function require(n)",
+             "  if loaded[n] ~= nil then return loaded[n] end",
+             "  local f = preload[n] or error('module not bundled: '..n)",
+             "  local m = f(); if m == nil then m = true end",
+             "  loaded[n] = m; return m",
+             "end"]
+    for name, src in libs.items():
+        parts.append(f"preload[{lua_str(name)}] = function(...)")
+        parts.append(src)
+        parts.append("end")
+    parts.append(body)
+    return "\n".join(parts)
+
 # ---- node programs --------------------------------------------------------------
 gateway_prog = f"""periphemu.create('back','modem',NET,true)
 rednet.open('back')
 os.setComputerLabel('gw')
-{write_files_lua({"gateway": HOST_LIBS["gateway"]}, {})}
+do local h = fs.open('gateway', 'w') h.write({lua_str(PRELUDE + HOST_LIBS["gateway"])}) h.close() end
 emit('gateway: starting')
-shell.run('gateway')
+local fn, lerr = loadfile('gateway')
+if not fn then emit('gateway PARSE: ' .. tostring(lerr)) return end
+if setfenv then setfenv(fn, getfenv(1)) end
+local ok, err = pcall(fn)
+emit('gateway EXITED: ' .. tostring(ok) .. ' ' .. tostring(err))
 """
 
 def worker_prog(label):
-    files = {f"{n}.lua": HOST_LIBS[n] for n in ["json", "cmval", "schema", "runtime"]}
-    files["worker"] = HOST_LIBS["worker"]
-    files["wasmcraft"] = BUNDLE
+    worker_amalg = amalgamate(HOST_LIBS["worker"],
+        {n: HOST_LIBS[n] for n in ["json", "cmval", "schema", "runtime"]})
+    files = {"worker": worker_amalg, "wasmcraft": BUNDLE}
     bins = {"hello.wasm": HELLO_WASM}
-    if CALLER_WASM:
+    if CALLER_WASM and label == "w2":
         bins["caller.wasm"] = CALLER_WASM
+    if GO_WASM and label == "w1":
+        bins["hello-go.wasm"] = GO_WASM
+    if JS_WASM and label == "w2":
+        bins["hello-js.wasm"] = JS_WASM
     return f"""periphemu.create('back','modem',NET,true)
 rednet.open('back')
 os.setComputerLabel('{label}')
 {write_files_lua(files, bins)}
 sleep(2)
 emit('{label}: starting')
-shell.run('worker', 'gw', '--slots', '1')
+local fn, lerr = loadfile('worker')
+if not fn then emit('{label} PARSE: ' .. tostring(lerr)) return end
+if setfenv then setfenv(fn, getfenv(1)) end
+local ok, err = pcall(fn, 'gw', '--slots', '2')
+emit('{label} EXITED: ' .. tostring(ok) .. ' ' .. tostring(err))
 """
 
 caller_test = ""
@@ -96,6 +140,30 @@ wait_running('caller')
 local relay = C:workload('caller')
 local viamesh = relay['greet-via']({{ target = 'hello', name = 'mesh' }})
 emit('mesh: ' .. tostring(viamesh))
+"""
+
+go_test = ""
+if GO_WASM:
+    go_test = f"""
+-- ANY-LANGUAGE, SAME ABI: the TinyGo reactor (file only on w1)
+r = C:deploy({{ name = 'hello-go', wasm = 'file:hello-go.wasm', kind = 'reactor',
+  schema = {lua_str(GO_SCHEMA)} }})
+emit('deploy hello-go: ' .. tostring(r.ok))
+wait_running('hello-go')
+local hgo = C:workload('hello-go')
+emit('go greet: ' .. tostring(hgo.greet({{ name = 'gopher', excited = true }})))
+"""
+
+js_test = ""
+if JS_WASM:
+    js_test = f"""
+-- COMMAND KIND: Javy-compiled JS, JSON in -> JSON out (file only on w2)
+r = C:deploy({{ name = 'hello-js', wasm = 'file:hello-js.wasm', kind = 'command' }})
+emit('deploy hello-js: ' .. tostring(r.ok))
+wait_running('hello-js')
+local hjs = C:workload('hello-js')
+local jr = hjs({{ fn = 'greet', name = 'quickjs' }})
+emit('js greet: ' .. tostring(type(jr) == 'table' and jr.result or jr))
 """
 
 client_test_body = f"""
@@ -129,6 +197,8 @@ local hello = C:workload('hello')
 emit('greet: ' .. tostring(hello.greet({{ name = 'crab', excited = true }})))
 emit('add: ' .. tostring(hello.add({{ a = 40, b = 2 }})))
 {caller_test}
+{go_test}
+{js_test}
 -- cluster state for the record
 local l = C:list()
 for _, w in ipairs(l.workloads or {{}}) do
@@ -139,14 +209,20 @@ if not __ok then emit('CLIENT ERROR: ' .. tostring(__err)) end
 done()
 """
 
+ctest_amalg = amalgamate(client_test_body,
+    {n: HOST_LIBS[n] for n in ["json", "cmval", "schema", "yaml", "client"]})
 client_prog = f"""periphemu.create('back','modem',NET,true)
 rednet.open('back')
 os.setComputerLabel('client')
-{write_files_lua({f"{n}.lua": HOST_LIBS[n] for n in ["json", "cmval", "schema", "yaml", "client"]}, {})}
-do local h = fs.open('ctest', 'w') h.write({lua_str(client_test_body)}) h.close() end
+do local h = fs.open('ctest', 'w') h.write({lua_str(ctest_amalg)}) h.close() end
 sleep(4)
 emit('client: starting')
-shell.run('ctest')
+local fn, lerr = loadfile('ctest')
+if not fn then emit('CTEST PARSE ERROR: ' .. tostring(lerr)) done() return end
+if setfenv then setfenv(fn, getfenv(1)) end
+local ok, err = pcall(fn)
+if not ok then emit('CTEST RUNTIME ERROR: ' .. tostring(err)) end
+done()
 """
 
 spec = {
@@ -205,6 +281,10 @@ checks = [
 ]
 if CALLER_WASM:
     checks.append(("cross-module mesh call", "mesh: via mesh: Hello, mesh!" in client_out))
+if GO_WASM:
+    checks.append(("Go reactor lane", "go greet: Hello from Go, gopher!!!" in client_out))
+if JS_WASM:
+    checks.append(("JS command lane", "js greet: Hello from JS, quickjs!" in client_out))
 
 failed = [name for name, ok in checks if not ok]
 for name, ok in checks:

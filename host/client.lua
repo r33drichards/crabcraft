@@ -90,11 +90,17 @@ function M.connect(gwname, opts)
       local f = sc.functions[addr]
       return function(argtbl)
         argtbl = argtbl or {}
-        -- positional or named: named keys win, else array order
         local values = {}
-        for i, p in ipairs(f.params) do
-          if argtbl[p.name] ~= nil then values[i] = argtbl[p.name]
-          else values[i] = argtbl[i] end
+        -- sugar: a function with ONE record param accepts the record's fields
+        -- directly: hello.greet{ name = "x" } instead of { req = { name = "x" } }
+        if #f.params == 1 and argtbl[f.params[1].name] == nil and argtbl[1] == nil then
+          values[1] = argtbl
+        else
+          -- positional or named: named keys win, else array order
+          for i, p in ipairs(f.params) do
+            if argtbl[p.name] ~= nil then values[i] = argtbl[p.name]
+            else values[i] = argtbl[i] end
+          end
         end
         local bytes = cm.encode_params(sc.param_types(addr), values)
         local r = self:request({ type = "invoke", name = name, func = addr, params = bytes }, 120)

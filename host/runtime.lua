@@ -60,8 +60,11 @@ function M.load_reactor(bytes, opts)
   local pending_call_reply -- LENBUF bytes the next crabcraft.call returns
   local inst
   imports.crabcraft = {
+    -- wasmcraft host-import convention: fn(args_array, inst) -> results_array.
     -- crab_call(wl_ptr, wl_len, fn_ptr, fn_len, par_ptr, par_len) -> lenbuf ptr
-    call = function(wl_ptr, wl_len, fn_ptr, fn_len, par_ptr, par_len)
+    call = function(a)
+      local wl_ptr, wl_len, fn_ptr, fn_len, par_ptr, par_len =
+        a[1], a[2], a[3], a[4], a[5], a[6]
       local mem = inst.memory
       local wl = mem:loadstr(wl_ptr, wl_len)
       local fn = mem:loadstr(fn_ptr, fn_len)
@@ -80,7 +83,7 @@ function M.load_reactor(bytes, opts)
       local len = #reply
       inst.memory:storestr(ptr, string.char(len % 256, math.floor(len / 256) % 256,
         math.floor(len / 65536) % 256, math.floor(len / 16777216) % 256) .. reply)
-      return ptr
+      return { ptr }
     end,
   }
   inst = wc.instantiate(module, imports, { mode = opts.mode or "transpile" })
