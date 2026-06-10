@@ -178,6 +178,39 @@ local function reconcile()
       end
     end
   end
+  -- adopt orphans: a slot already running this workload (e.g. from a disk
+  -- after reboots) beats assigning a fresh copy elsewhere
+  for wname, spec in pairs(registry) do
+    if not placements[wname] then
+      for wid, w in pairs(workers) do
+        if os.clock() - w.last < 20 then
+          for slot, wl in pairs(w.slots) do
+            if wl == wname then
+              placements[wname] = { worker = wid, slot = slot, state = "running" }
+              dlog(("reconcile: adopted running '%s' on worker %d %s"):format(wname, wid, slot))
+              break
+            end
+          end
+        end
+        if placements[wname] then break end
+      end
+    end
+  end
+  -- GC: drain slots running workloads that are no longer in the registry
+  for wid, w in pairs(workers) do
+    if os.clock() - w.last < 20 then
+      for slot, wl in pairs(w.slots) do
+        if wl ~= false and not registry[wl] then
+          local placed = placements[wl]
+          if not (placed and placed.worker == wid and placed.slot == slot) then
+            dlog(("reconcile: draining unknown '%s' on worker %d %s"):format(tostring(wl), wid, slot))
+            rednet.send(wid, { type = "drain", slot = slot }, PROTO)
+            w.slots[slot] = false
+          end
+        end
+      end
+    end
+  end
   -- place unplaced workloads
   for wname, spec in pairs(registry) do
     if not placements[wname] then
@@ -247,11 +280,27 @@ local function handle(sender, msg)
       respond(sender, { ok = false, err = "deploy needs name and url" }, msg.id)
       return
     end
+    if registry[msg.name] and not msg.force then
+      respond(sender, { ok = false, err = "workload '" .. msg.name ..
+        "' already deployed - crb remove " .. msg.name .. " first (or deploy force=true)" }, msg.id)
+      return
+    end
     registry[msg.name] = { url = msg.url, kind = msg.kind or "reactor", schema = msg.schema, warm = msg.warm }
     save_registry()
     dlog(("deploy '%s' (%s) registered"):format(msg.name, msg.kind or "reactor"))
     respond(sender, { ok = true, output = "registered " .. msg.name }, msg.id)
     reconcile()
+  elseif t == "purge" then
+    local n = 0
+    for wname in pairs(registry) do n = n + 1 end
+    for wname, p in pairs(placements) do
+      rednet.send(p.worker, { type = "drain", slot = p.slot }, PROTO)
+      if workers[p.worker] then workers[p.worker].slots[p.slot] = false end
+    end
+    registry, placements = {}, {}
+    save_registry()
+    dlog(("purge: %d workload(s) erased"):format(n))
+    respond(sender, { ok = true, output = ("purged %d workload(s)"):format(n) }, msg.id)
   elseif t == "remove" then
     local p = placements[msg.name]
     if p then
