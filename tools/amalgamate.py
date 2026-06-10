@@ -71,5 +71,14 @@ with open("dist/crb.lua", "w") as f:
                        ["json", "cmval", "schema", "yaml", "client"],
                        "-- crb: the crabcraft CLI (amalgamated; see host/)\n"))
 
-for p in ["dist/gateway.lua", "dist/worker.lua", "dist/crb.lua"]:
+# crblib: the client runtime as a requireable module (generated clients
+# bootstrap this from the release)
+with open("dist/crblib.lua", "w") as f:
+    f.write(amalgamate(
+        'return { client = require("client"), json = require("json"), '
+        'cmval = require("cmval"), schema = require("schema"), yaml = require("yaml") }',
+        ["json", "cmval", "schema", "yaml", "client"],
+        "-- crblib: crabcraft client runtime (amalgamated; see host/)\n"))
+
+for p in ["dist/gateway.lua", "dist/worker.lua", "dist/crb.lua", "dist/crblib.lua"]:
     print(p, os.path.getsize(p), "bytes")

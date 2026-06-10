@@ -80,9 +80,21 @@ function M.connect(gwname, opts)
     return r.schema, nil, r.kind
   end
 
+  -- the factory from a schema you already have (generated clients embed it)
+  function C:workload_from_schema(name, sjson, kind)
+    return self:_proxy(name, sjson, kind)
+  end
+
   -- the factory: a proxy whose methods are the workload's WIT functions
   function C:workload(name)
     local sjson, err, kind = self:schema(name)
+    if sjson == nil and kind ~= "command" then
+      error("no schema for workload '" .. name .. "': " .. tostring(err), 0)
+    end
+    return self:_proxy(name, sjson, kind)
+  end
+
+  function C:_proxy(name, sjson, kind)
     if kind == "command" then
       -- command kind: one callable taking/returning JSON-able tables
       return setmetatable({}, { __call = function(_, body)
@@ -93,7 +105,6 @@ function M.connect(gwname, opts)
         return ok and decoded or r.result
       end })
     end
-    assert(sjson, "no schema for workload '" .. name .. "': " .. tostring(err))
     local sc = schema_mod.load(sjson)
     local proxy = { __name = name, __schema = sc }
     -- short name -> full address (unambiguous short names only)

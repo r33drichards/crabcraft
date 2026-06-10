@@ -22,7 +22,22 @@ if not opened then print("gateway: no modem attached."); return end
 rednet.host(PROTO, name)
 
 -- ---- state -------------------------------------------------------------------
-local registry = {}   -- name -> { url, kind, schema }
+local registry = {}   -- name -> { url, kind, schema }  (persisted to disk)
+local REGFILE = ".crab_registry"
+local function save_registry()
+  if type(fs) ~= "table" or not textutils then return end
+  local h = fs.open(REGFILE, "w")
+  if h then h.write(textutils.serialize(registry)); h.close() end
+end
+local function load_registry()
+  if type(fs) ~= "table" or not fs.exists(REGFILE) then return end
+  local h = fs.open(REGFILE, "r")
+  if not h then return end
+  local ok, t = pcall(textutils.unserialize, h.readAll())
+  h.close()
+  if ok and type(t) == "table" then registry = t end
+end
+load_registry()
 local workers = {}    -- wid -> { label, slots = { [slot] = workload|false }, last }
 local placements = {} -- name -> { worker = wid, slot = s, state = "assigning"|"running" }
 local inflight = {}   -- reqid -> { from = senderid, t = clock }
@@ -233,6 +248,7 @@ local function handle(sender, msg)
       return
     end
     registry[msg.name] = { url = msg.url, kind = msg.kind or "reactor", schema = msg.schema, warm = msg.warm }
+    save_registry()
     dlog(("deploy '%s' (%s) registered"):format(msg.name, msg.kind or "reactor"))
     respond(sender, { ok = true, output = "registered " .. msg.name }, msg.id)
     reconcile()
@@ -243,6 +259,7 @@ local function handle(sender, msg)
       if workers[p.worker] then workers[p.worker].slots[p.slot] = false end
     end
     registry[msg.name] = nil
+    save_registry()
     placements[msg.name] = nil
     respond(sender, { ok = true, output = "removed " .. tostring(msg.name) }, msg.id)
   elseif t == "list" then
@@ -322,6 +339,11 @@ end)
 
 print(("gateway '%s' up on protocol '%s' - control loop every 5s"):format(name, PROTO))
 if mon then dlog("dashboard on monitor") else print("(no monitor attached - dashboard off)") end
+do
+  local n = 0
+  for _ in pairs(registry) do n = n + 1 end
+  if n > 0 then dlog(("registry restored from disk: %d workload(s)"):format(n)) end
+end
 local ev = {}
 while true do
   for i = #tasks, 1, -1 do
