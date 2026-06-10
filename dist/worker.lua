@@ -864,7 +864,7 @@ end
 local gwname = args[1]
 if gwname == "--slots" then gwname = nil end
 
-package.path = "host/?.lua;./?.lua;" .. package.path
+if package and package.path then package.path = "host/?.lua;./?.lua;" .. package.path end
 local rt = require("runtime")
 local cm = require("cmval")
 local json = require("json")

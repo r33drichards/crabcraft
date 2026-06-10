@@ -6,7 +6,7 @@
 --   crb remove <name> [gateway]
 -- Manifest:  name: hello / wasm: <url|file:path> / kind: reactor|command /
 --            schema: <path-or-url to resolved-WIT json>   (reactor kind)
-package.path = "host/?.lua;./?.lua;" .. package.path
+if package and package.path then package.path = "host/?.lua;./?.lua;" .. package.path end
 local yaml = require("yaml")
 local json = require("json")
 local client = require("client")

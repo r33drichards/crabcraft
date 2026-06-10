@@ -7,7 +7,7 @@
 -- params are plain Lua tables validated/encoded per the schema; results are
 -- decoded back to Lua values. No codegen.
 local PROTO = "crabcraft"
-package.path = "host/?.lua;./?.lua;" .. package.path
+if package and package.path then package.path = "host/?.lua;./?.lua;" .. package.path end
 local cm = require("cmval")
 local json = require("json")
 local schema_mod = require("schema")

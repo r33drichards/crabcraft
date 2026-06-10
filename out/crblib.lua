@@ -823,7 +823,8 @@ function M.connect(gwname, opts)
   -- raw operations
   function C:list() return self:request({ type = "list" }) end
   function C:deploy(spec) return self:request({ type = "deploy", name = spec.name,
-    url = spec.wasm or spec.url, kind = spec.kind, schema = spec.schema, warm = spec.warm }) end
+    url = spec.wasm or spec.url, kind = spec.kind, schema = spec.schema,
+    warm = spec.warm, force = spec.force }) end
   function C:remove(name) return self:request({ type = "remove", name = name }) end
   function C:schema(name)
     local r = self:request({ type = "schema", name = name })

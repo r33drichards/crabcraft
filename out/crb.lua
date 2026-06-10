@@ -823,7 +823,8 @@ function M.connect(gwname, opts)
   -- raw operations
   function C:list() return self:request({ type = "list" }) end
   function C:deploy(spec) return self:request({ type = "deploy", name = spec.name,
-    url = spec.wasm or spec.url, kind = spec.kind, schema = spec.schema, warm = spec.warm }) end
+    url = spec.wasm or spec.url, kind = spec.kind, schema = spec.schema,
+    warm = spec.warm, force = spec.force }) end
   function C:remove(name) return self:request({ type = "remove", name = name }) end
   function C:schema(name)
     local r = self:request({ type = "schema", name = name })
@@ -928,7 +929,7 @@ local cmd = args[1]
 if not cmd then
   print("usage:")
   print("  crb deploy <file.yml>")
-  print("  crb ls | schema <name> | remove <name>")
+  print("  crb ls | schema <name> | rm <name> | purge")
   print("  crb invoke <name> <func> [key=value ...]")
   print("  crb gen <name> [outfile]      (generate a typed Lua client)")
   print("  (-g <gateway> anywhere to pick a gateway)")
@@ -975,7 +976,7 @@ if cmd == "deploy" then
   local file = assert(args[2], "crb deploy <file.yml>")
   local m = yaml.decode(assert(readfile(file), "manifest not found: " .. file))
   assert(m.name and (m.wasm or m.url), "manifest needs name + wasm")
-  local spec = { name = m.name, wasm = m.wasm or m.url, kind = m.kind or "reactor", warm = m.warm }
+  local spec = { name = m.name, wasm = m.wasm or m.url, kind = m.kind or "reactor", warm = m.warm, force = m.force }
   if m.schema then spec.schema = fetch(m.schema) end
   local C = client.connect(GW)
   local r = C:deploy(spec)
@@ -1135,9 +1136,14 @@ elseif cmd == "gen" then
   else local f2 = assert(io.open(outfile, "w")) f2:write(table.concat(out, "\n")) f2:close() end
   print(("wrote %s (%d lines) - require(%q)"):format(outfile, #out, (outfile:gsub("%.lua$", ""))))
 
-elseif cmd == "remove" then
+elseif cmd == "remove" or cmd == "rm" or cmd == "del" or cmd == "delete" then
   local C = client.connect(GW)
-  local r = C:remove(assert(args[2], "crb remove <name>"))
+  local r = C:remove(assert(args[2], "crb rm <name>"))
+  print(r.ok and r.output or ("FAILED: " .. tostring(r.err)))
+
+elseif cmd == "purge" then
+  local C = client.connect(GW)
+  local r = C:request({ type = "purge" })
   print(r.ok and r.output or ("FAILED: " .. tostring(r.err)))
 
 else
