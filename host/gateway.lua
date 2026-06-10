@@ -199,14 +199,18 @@ local function reconcile()
       end
     end
   end
-  -- GC: drain slots running workloads that are no longer in the registry
+  -- GC: drain slots running workloads not in the registry, AND duplicate
+  -- copies of registered workloads that are not the placement (one workload,
+  -- one slot - duplicates appear after failed-assign/recovery races)
   for wid, w in pairs(workers) do
     if os.clock() - w.last < 20 then
       for slot, wl in pairs(w.slots) do
-        if wl ~= false and not registry[wl] then
+        if wl ~= false then
           local placed = placements[wl]
-          if not (placed and placed.worker == wid and placed.slot == slot) then
-            dlog(("reconcile: draining unknown '%s' on worker %d %s"):format(tostring(wl), wid, slot))
+          local is_placement = placed and placed.worker == wid and placed.slot == slot
+          if not is_placement and (not registry[wl] or placed) then
+            dlog(("reconcile: draining %s '%s' on worker %d %s"):format(
+              registry[wl] and "duplicate" or "unknown", tostring(wl), wid, slot))
             rednet.send(wid, { type = "drain", slot = slot }, PROTO)
             w.slots[slot] = false
           end

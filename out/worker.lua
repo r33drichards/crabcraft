@@ -853,7 +853,7 @@ end
 --   worker [gatewayName]      (default: first crabcraft host found)
 -- Needs beside it: runtime.lua, cmval.lua, json.lua, and the wasmcraft bundle.
 local PROTO = "crabcraft"
-local CRAB_VERSION = "0.2.2" -- stamped by tools/amalgamate.py
+local CRAB_VERSION = "0.2.3" -- stamped by tools/amalgamate.py
 local WORKER_URL = "https://github.com/r33drichards/crabcraft/releases/latest/download/worker.lua"
 local args = { ... }
 if args[1] == "--install" and type(fs) == "table" then
@@ -1073,7 +1073,14 @@ local function assign(msg)
   writefile(s.dir .. "/crab-meta.json", json.encode(s.meta))
   s.w, s.module = nil, nil
   local ok, err = pcall(start_slot, msg.slot)
-  if not ok then return { ok = false, err = "start failed: " .. tostring(err) } end
+  if not ok then
+    -- clear the slot completely: a phantom meta would be advertised by
+    -- heartbeats and wrongly adopted by the gateway
+    s.meta, s.w, s.module, s.session = nil, nil, nil, nil
+    delfile(s.dir .. "/crab-meta.json")
+    delfile(s.dir .. "/workload.wasm")
+    return { ok = false, err = "start failed: " .. tostring(err) }
+  end
   return { ok = true }
 end
 
