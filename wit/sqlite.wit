@@ -1,0 +1,15 @@
+// crabcraft SQLite workload, C edition: proves the "any language, our ABI"
+// contract (Rust and Go exist; this is the C lane) and disk persistence --
+// the host mounts the workload's volume as its WASI cwd, so the database
+// file `crab.db` survives reboots and travels with the volume.
+package crab:sqlite@0.1.0;
+
+interface db {
+  /// execute SQL against the workload's database file (persisted on its volume).
+  /// returns a JSON string: {"columns":[...],"rows":[[...],...],"changes":n}
+  exec: func(sql: string) -> result<string, string>;
+}
+
+world sqlite {
+  export db;
+}

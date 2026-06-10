@@ -6,7 +6,10 @@
 //   stdout: {"ok":true,"result":"Hello from JS, x!!!"} | {"ok":true,"result":3}
 //           {"ok":false,"err":"..."} on any failure
 //
-// Built with Javy (QuickJS -> wasi command module): see build.sh.
+// NOTE: this Javy-flavored source (Javy.IO) is kept as the contract
+// reference. The SHIPPED module is built from hello-embed.js + main.c
+// (QuickJS compiled SIMD-free for the pure-Lua wasmcraft engine): see
+// build.sh. Keep the two JS files' logic in sync.
 
 function readStdin() {
   const chunks = [];

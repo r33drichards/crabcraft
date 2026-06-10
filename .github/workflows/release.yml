@@ -1,0 +1,51 @@
+name: release
+
+# Releases are IMMUTABLE: cut a NEW version for each release.
+# releases/latest/download/<asset> follows the newest release.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "new release tag (vX.Y.Z) - must not already exist"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: package
+        run: |
+          python3 tools/amalgamate.py
+          mkdir -p out
+          cp dist/gateway.lua dist/worker.lua dist/crb.lua out/
+          cp modules/*.wasm out/
+          cp wit/*.json out/
+          (cd out && sha256sum * > SHA256SUMS)
+          ls -la out
+
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          {
+            echo "crabcraft: wasm orchestration for ComputerCraft - WIT interfaces, wRPC-subset encoding, rednet transport, gateway/worker control plane on the wasmcraft engine."
+            echo
+            echo "In-game (3 computers + modems; workers want disk drives):"
+            echo '```'
+            echo "wget https://github.com/$GITHUB_REPOSITORY/releases/latest/download/gateway.lua gateway"
+            echo "wget https://github.com/$GITHUB_REPOSITORY/releases/latest/download/worker.lua worker"
+            echo "wget https://github.com/$GITHUB_REPOSITORY/releases/latest/download/crb.lua crb"
+            echo '```'
+          } > notes.md
+          if gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $VERSION already exists - releases are immutable" >&2
+            exit 1
+          fi
+          gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" \
+            --title "crabcraft $VERSION" --notes-file notes.md out/*
