@@ -26,12 +26,31 @@ function M.connect(gwname, opts)
   opts = opts or {}
   assert(open_modems(), "client: no modem attached")
   local gw
-  for _ = 1, opts.attempts or 4 do
-    if gwname then gw = rednet.lookup(PROTO, gwname, 5)
-    else local hosts = { rednet.lookup(PROTO, nil, 5) }; gw = hosts[1] end
-    if gw then break end
+  -- cached id + direct ping first: busy gateways miss dns lookup windows
+  local function readcache()
+    local f = io.open(".crab_gateway", "r")
+    if not f then return nil end
+    local v = tonumber(f:read("*a")); f:close(); return v
+  end
+  local cached = readcache()
+  if cached and not gwname then
+    rednet.send(cached, { type = "ping", id = "cli:ping" }, PROTO)
+    local t = os.clock()
+    while os.clock() - t < 5 do
+      local s, r = rednet.receive(PROTO, 5 - (os.clock() - t))
+      if s == cached and type(r) == "table" and r.id == "cli:ping" then gw = cached; break end
+    end
+  end
+  if not gw then
+    for _ = 1, opts.attempts or 4 do
+      if gwname then gw = rednet.lookup(PROTO, gwname, 5)
+      else local hosts = { rednet.lookup(PROTO, nil, 5) }; gw = hosts[1] end
+      if gw then break end
+    end
   end
   assert(gw, "client: no crabcraft gateway on the network")
+  local f = io.open(".crab_gateway", "w")
+  if f then f:write(tostring(gw)); f:close() end
 
   local C = { gw = gw, seq = 0 }
 

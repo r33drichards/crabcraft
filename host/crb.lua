@@ -14,10 +14,42 @@ local schema_mod = require("schema")
 local cm = require("cmval")
 
 local args = { ... }
+-- -g <gateway> may appear anywhere (no trailing positional: the CC shell
+-- splits on spaces, so values would get mistaken for a gateway name)
+local GW = nil
+for i = #args - 1, 1, -1 do
+  if args[i] == "-g" then
+    GW = args[i + 1]
+    table.remove(args, i + 1); table.remove(args, i)
+  end
+end
 local cmd = args[1]
 if not cmd then
-  print("usage: crb deploy <file.yml> | ls | invoke <name> <func> [json] | schema <name> | remove <name>")
+  print("usage:")
+  print("  crb deploy <file.yml>")
+  print("  crb ls | schema <name> | remove <name>")
+  print("  crb invoke <name> <func> [key=value ...]")
+  print("  crb sql <statement...>        (the sqlite workload)")
+  print("  (-g <gateway> anywhere to pick a gateway)")
   return
+end
+
+-- key=value tokens -> argument table; values coerce json-ish
+local function coerce(v)
+  if v == "true" then return true end
+  if v == "false" then return false end
+  local n = tonumber(v)
+  if n then return n end
+  return v
+end
+local function kvargs(from)
+  local t = {}
+  for i = from, #args do
+    local k, v = args[i]:match("^([%w_%-]+)=(.*)$")
+    if k then t[k] = coerce(v)
+    else t[#t + 1] = coerce(args[i]) end
+  end
+  return t
 end
 
 local function readfile(p)
@@ -44,12 +76,12 @@ if cmd == "deploy" then
   assert(m.name and (m.wasm or m.url), "manifest needs name + wasm")
   local spec = { name = m.name, wasm = m.wasm or m.url, kind = m.kind or "reactor", warm = m.warm }
   if m.schema then spec.schema = fetch(m.schema) end
-  local C = client.connect(args[3])
+  local C = client.connect(GW)
   local r = C:deploy(spec)
   print(r.ok and ("deployed '" .. m.name .. "' (" .. spec.kind .. ")") or ("FAILED: " .. tostring(r.err)))
 
 elseif cmd == "ls" then
-  local C = client.connect(args[2])
+  local C = client.connect(GW)
   local r = C:list()
   if not r.ok then print("FAILED: " .. tostring(r.err)) return end
   print("WORKLOADS")
@@ -65,7 +97,7 @@ elseif cmd == "ls" then
 
 elseif cmd == "schema" then
   local name = assert(args[2], "crb schema <name>")
-  local C = client.connect(args[3])
+  local C = client.connect(GW)
   local sjson, err, kind = C:schema(name)
   if kind == "command" then print(name .. ": command kind (JSON in -> JSON out)") return end
   if not sjson then print("FAILED: " .. tostring(err)) return end
@@ -81,18 +113,45 @@ elseif cmd == "schema" then
   end
 
 elseif cmd == "invoke" then
-  local name = assert(args[2], "crb invoke <name> <func> [json-args]")
-  local func = assert(args[3], "crb invoke <name> <func> [json-args]")
-  local argjson = args[4] or "{}"
-  local C = client.connect(args[5])
+  local name = assert(args[2], "crb invoke <name> <func> [key=value ...]")
+  local func = assert(args[3], "crb invoke <name> <func> [key=value ...]")
+  local argv
+  if args[4] and args[4]:sub(1, 1) == "{" then
+    -- raw JSON still accepted (rejoin what the shell split)
+    argv = json.decode(table.concat(args, " ", 4))
+  else
+    argv = kvargs(4)
+  end
+  local C = client.connect(GW)
   local w = C:workload(name)
-  local argv = json.decode(argjson)
   local ok, res = pcall(function() return w[func](argv) end)
   if not ok then print("FAILED: " .. tostring(res)) return end
   if type(res) == "table" then print(json.encode(res)) else print(tostring(res)) end
 
+elseif cmd == "sql" then
+  -- crb sql SELECT * FROM pets        (everything after 'sql' is the statement)
+  local stmt = table.concat(args, " ", 2)
+  assert(#stmt > 0, "crb sql <statement...>")
+  local C = client.connect(GW)
+  local db = C:workload("sqlite")
+  local ok, res = pcall(function() return db.exec({ sql = stmt }) end)
+  if not ok then print("FAILED: " .. tostring(res)) return end
+  if type(res) == "table" and res.is_err then print("SQL ERROR: " .. tostring(res.err))
+  elseif type(res) == "table" and res.ok then
+    local okj, rows = pcall(json.decode, res.ok)
+    if okj and rows.columns then
+      print(table.concat(rows.columns, " | "))
+      for _, row in ipairs(rows.rows or {}) do
+        local cells = {}
+        for i, cell in ipairs(row) do cells[i] = tostring(cell) end
+        print(table.concat(cells, " | "))
+      end
+      print(("(%s change(s))"):format(tostring(rows.changes)))
+    else print(tostring(res.ok)) end
+  else print(json.encode(res)) end
+
 elseif cmd == "remove" then
-  local C = client.connect(args[3])
+  local C = client.connect(GW)
   local r = C:remove(assert(args[2], "crb remove <name>"))
   print(r.ok and r.output or ("FAILED: " .. tostring(r.err)))
 

@@ -45,8 +45,19 @@ end
 
 draw = function()
   if not mon then return end
-  mon.setTextScale(0.5)
-  local W, H = mon.getSize()
+  -- adaptive scale: biggest text that still fits the content
+  local needed = 8 + 4 -- headers/spacing + log tail
+  for _ in pairs(registry) do needed = needed + 1 end
+  for _, w in pairs(workers) do
+    needed = needed + 1
+    for _ in pairs(w.slots) do needed = needed + 1 end
+  end
+  local W, H
+  for _, scale in ipairs({ 5, 4.5, 4, 3.5, 3, 2.5, 2, 1.5, 1, 0.5 }) do
+    mon.setTextScale(scale)
+    W, H = mon.getSize()
+    if (H >= needed and W >= 46) or scale == 0.5 then break end
+  end
   local colour = mon.isColour and mon.isColour()
   local function c(fg) if colour then mon.setTextColour(fg) end end
   mon.setBackgroundColour(colours.black)
@@ -88,8 +99,18 @@ draw = function()
       total = total + 1
       if wl == false then free = free + 1 end
     end
-    line(("  #%-4d %-12s %d/%d slots free   %s"):format(wid, tostring(w.label),
+    line(("  #%-4d %-12s %d/%d free  %s"):format(wid, tostring(w.label),
       free, total, alive and "alive" or "LOST"), alive and colours.lime or colours.red)
+    for slot, wl in pairs(w.slots) do
+      if wl == false then
+        line(("    %-8s (free)"):format(slot), colours.grey)
+      else
+        local spec = registry[wl]
+        local wasm = spec and spec.url and (spec.url:match("([^/]+)$") or spec.url) or "?"
+        line(("    %-8s %-12s %s"):format(slot, tostring(wl), wasm),
+          alive and colours.white or colours.red)
+      end
+    end
   end
   if not any then line("  (none registered - start worker computers)", colours.grey) end
   y = y + 1
