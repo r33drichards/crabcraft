@@ -129,10 +129,12 @@ function M.run_command(bytes, body, opts)
   local module = opts.module or wc.load(bytes)
   local out = {}
   local input, pos = (body or "") .. "\n", 1
+  local argt = { opts.name or "workload" }
+  for _, a in ipairs(opts.argv or {}) do argt[#argt + 1] = tostring(a) end
   local host = wc.wasi.make({
     fs = (wc.hostfs and wc.hostfs(opts.root or ".")) or nil,
     root = opts.root or ".",
-    args = { opts.name or "workload" },
+    args = argt,
     stdin = function(maxlen)
       if pos > #input then return "" end
       local c = input:sub(pos, pos + maxlen - 1)

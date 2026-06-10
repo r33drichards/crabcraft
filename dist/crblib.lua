@@ -824,7 +824,7 @@ function M.connect(gwname, opts)
   function C:list() return self:request({ type = "list" }) end
   function C:deploy(spec) return self:request({ type = "deploy", name = spec.name,
     url = spec.wasm or spec.url, kind = spec.kind, schema = spec.schema,
-    warm = spec.warm, force = spec.force }) end
+    warm = spec.warm, force = spec.force, args = spec.args, body_file = spec.body_file }) end
   function C:remove(name) return self:request({ type = "remove", name = name }) end
   function C:schema(name)
     local r = self:request({ type = "schema", name = name })
