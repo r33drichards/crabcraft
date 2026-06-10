@@ -123,10 +123,14 @@ print(picat("main => println(fib(10)).\nfib(0)=1.\nfib(1)=1.\nfib(N)=fib(N-1)+fi
   remain until redefined. A worker reboot or redeploy gives a fresh session
   (the gateway restarts it automatically). To force a reset:
   `crb rm picat && crb deploy picat.yml`.
-- **One in-flight invoke per workload.** Calls queue on the worker. For
-  parallel solving, deploy the same wasm under several names (`picat`,
-  `picat2`, ...) — the scheduler spreads them across workers, and co-located
-  workloads serve concurrently.
+- **Named sessions, shared execution** (picatd's `pic -n` model): pass a
+  session name and you get a separate live engine with separate state, booted
+  on first use, executing CONCURRENTLY with every other session:
+  `crb invoke picat run ... -s alice`, or from a script
+  `picat("program", "alice")`. Reset one with `crb reset picat -s alice`
+  (script: `picat.reset("alice")`). Omitting the name uses `main`. For
+  spreading load across WORKERS, deploy the same wasm under more names
+  (`picat2.yml`) - sessions share their workload's slot and computer.
 - **Placement is the gateway's job.** The workload may land on any worker
   with a free disk; its files (programs, anything it writes) live on that
   floppy and survive reboots. `crb ls` shows where everything is.

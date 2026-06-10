@@ -848,10 +848,19 @@ function M.connect(gwname, opts)
 
   function C:_proxy(name, sjson, kind)
     if kind == "command" or kind == "session" then
-      -- command/session kinds: one callable; strings pass through verbatim
-      return setmetatable({}, { __call = function(_, body)
+      -- command/session kinds: one callable; strings pass through verbatim.
+      -- session kind: optional second arg = named session ("main" default),
+      -- proxy.reset(sess) discards a session's state (picatd's .reset)
+      local p = {}
+      p.reset = function(sess)
         local r = self:request({ type = "invoke", name = name,
-          body = type(body) == "string" and body or json.encode(body) }, 120)
+          session = sess, reset = true }, 60)
+        if not r.ok then error("reset failed: " .. tostring(r.err), 0) end
+        return r.result
+      end
+      return setmetatable(p, { __call = function(_, body, sess)
+        local r = self:request({ type = "invoke", name = name, session = sess,
+          body = type(body) == "string" and body or json.encode(body) }, 300)
         if not r.ok then error("invoke failed: " .. tostring(r.err), 0) end
         local ok, decoded = pcall(json.decode, r.result)
         return ok and decoded or r.result
@@ -919,9 +928,13 @@ local args = { ... }
 -- -g <gateway> may appear anywhere (no trailing positional: the CC shell
 -- splits on spaces, so values would get mistaken for a gateway name)
 local GW = nil
+local SESS = nil
 for i = #args - 1, 1, -1 do
   if args[i] == "-g" then
     GW = args[i + 1]
+    table.remove(args, i + 1); table.remove(args, i)
+  elseif args[i] == "-s" then
+    SESS = args[i + 1]
     table.remove(args, i + 1); table.remove(args, i)
   end
 end
@@ -930,7 +943,8 @@ if not cmd then
   print("usage:")
   print("  crb deploy <file.yml>")
   print("  crb ls | schema <name> | rm <name> | purge | update")
-  print("  crb invoke <name> <func> [key=value ...]")
+  print("  crb invoke <name> <func> [args...]   (-s <session> for session kinds)")
+  print("  crb reset <name> [-s <session>]")
   print("  crb gen <name> [outfile]      (generate a typed Lua client)")
   print("  (-g <gateway> anywhere to pick a gateway)")
   return
@@ -1050,7 +1064,7 @@ elseif cmd == "invoke" or cmd == "call" then
   end
   local ok, res = pcall(function()
     if fdef then return w[func](argv) end
-    return w(argv) -- command kind: the proxy itself is callable
+    return w(argv, SESS) -- command/session kinds: the proxy itself is callable
   end)
   if not ok then print("FAILED: " .. tostring(res)) return end
   -- result rendering: unwrap result<ok,err>; tabulate {columns,rows} JSON
@@ -1156,6 +1170,14 @@ elseif cmd == "update" then
     local r = C:request({ type = "update-gateway" }, 30)
     print(r.ok and r.output or ("FAILED: " .. tostring(r.err)))
   end
+
+elseif cmd == "reset" then
+  -- crb reset picat [-s foo]   discard a named session's state
+  local name = assert(args[2], "crb reset <workload> [-s session]")
+  local C = client.connect(GW)
+  local w = C:workload(name)
+  assert(w.reset, "workload '" .. name .. "' is not a session kind")
+  print(w.reset(SESS))
 
 elseif cmd == "purge" then
   local C = client.connect(GW)
