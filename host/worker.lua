@@ -121,10 +121,30 @@ do
   end
 end
 
+local function slot_used(dir)
+  if type(fs) == "table" and fs.getCapacity then
+    local ok, cap = pcall(fs.getCapacity, dir)
+    local ok2, free = pcall(fs.getFreeSpace, dir)
+    if ok and ok2 and cap and free then return cap - free end
+  end
+  local total = 0
+  if type(fs) == "table" and fs.list then
+    local function walk(p)
+      for _, f in ipairs(fs.list(p) or {}) do
+        local fp = fs.combine(p, f)
+        if fs.isDir(fp) then walk(fp) else total = total + (fs.getSize(fp) or 0) end
+      end
+    end
+    pcall(walk, dir)
+  end
+  return total
+end
+
 local function slot_list()
   local out = {}
   for sname, s in pairs(slots) do
     out[#out + 1] = { disk = sname, workload = s.meta and s.meta.name or nil,
+      used = slot_used(s.dir),
       state = s.meta and ((s.w or s.session or (s.meta.kind == "command" and s.module)) and "running" or "loading") or nil }
   end
   return out

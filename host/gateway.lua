@@ -86,11 +86,15 @@ draw = function()
     mon.write(txt:sub(1, W))
     y = y + 1
   end
-  local nworkers, inflight_n = 0, 0
-  for _ in pairs(workers) do nworkers = nworkers + 1 end
+  local nworkers, inflight_n, used_total = 0, 0, 0
+  for _, w in pairs(workers) do
+    nworkers = nworkers + 1
+    for _, u in pairs(w.used or {}) do used_total = used_total + (u or 0) end
+  end
   for _ in pairs(inflight) do inflight_n = inflight_n + 1 end
-  line(("crabcraft gateway '%s' v%s   up %ds   workers %d   inflight %d")
-    :format(name, CRAB_VERSION, os.clock() - started, nworkers, inflight_n), colours.yellow)
+  line(("crabcraft gateway '%s' v%s   up %ds   workers %d   inflight %d   storage %.1f MB")
+    :format(name, CRAB_VERSION, os.clock() - started, nworkers, inflight_n,
+      used_total / 1048576), colours.yellow)
   y = y + 1
   line("WORKLOADS", colours.lightBlue)
   local any = false
@@ -119,12 +123,13 @@ draw = function()
       tostring(w.version or "?"), free, total, alive and "alive" or "LOST"),
       alive and colours.lime or colours.red)
     for slot, wl in pairs(w.slots) do
+      local mb = ((w.used or {})[slot] or 0) / 1048576
       if wl == false then
-        line(("    %-8s (free)"):format(slot), colours.grey)
+        line(("    %-8s (free)  %.1fMB"):format(slot, mb), colours.grey)
       else
         local spec = registry[wl]
         local wasm = spec and spec.url and (spec.url:match("([^/]+)$") or spec.url) or "?"
-        line(("    %-8s %-12s %s"):format(slot, tostring(wl), wasm),
+        line(("    %-8s %-12s %-16s %.1fMB"):format(slot, tostring(wl), wasm, mb),
           alive and colours.white or colours.red)
       end
     end
@@ -246,8 +251,12 @@ local function handle(sender, msg)
     respond(sender, { ok = true, output = name }, msg.id)
   elseif t == "register" then
     local slots = {}
-    for _, s in ipairs(msg.slots or {}) do slots[s.disk] = s.workload or false end
-    workers[sender] = { label = msg.worker, slots = slots, last = os.clock(), version = msg.version }
+    local used = {}
+    for _, s in ipairs(msg.slots or {}) do
+      slots[s.disk] = s.workload or false
+      used[s.disk] = s.used
+    end
+    workers[sender] = { label = msg.worker, slots = slots, used = used, last = os.clock(), version = msg.version }
     dlog(("worker %d (%s) registered with %d slot(s)"):format(sender, tostring(msg.worker), #(msg.slots or {})))
     -- adopt existing placements (worker reboot recovery; running slots only)
     for _, s in ipairs(msg.slots or {}) do
@@ -277,9 +286,11 @@ local function handle(sender, msg)
       w.last = os.clock()
       if msg.version then w.version = msg.version end
       w.states = w.states or {}
+      w.used = w.used or {}
       for _, s in ipairs(msg.slots or {}) do
         w.slots[s.disk] = s.workload or false
         w.states[s.disk] = s.state
+        w.used[s.disk] = s.used
       end
       for wname, p in pairs(placements) do
         if p.worker == sender then

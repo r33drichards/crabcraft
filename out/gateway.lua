@@ -4,7 +4,7 @@
 -- worker slots, and routes invoke traffic. Run on a CC computer with a modem:
 --   gateway [name]            (default name "gateway")
 local PROTO = "crabcraft"
-local CRAB_VERSION = "0.2.5" -- stamped by tools/amalgamate.py
+local CRAB_VERSION = "0.2.6" -- stamped by tools/amalgamate.py
 local GATEWAY_URL = "https://github.com/r33drichards/crabcraft/releases/latest/download/gateway.lua"
 local args = { ... }
 -- --install: relaunch on every boot (daemon computers reboot on chunk unload)

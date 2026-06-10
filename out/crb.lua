@@ -1107,8 +1107,9 @@ elseif cmd == "gen" then
   emit("  return proxy")
   emit("end")
   emit("local M = {}")
-  if kind == "command" then
-    emit("-- command kind: one callable, JSON-able table in -> decoded reply out")
+  if kind == "command" or kind == "session" then
+    emit("-- " .. kind .. " kind: one callable - body in (string or JSON-able table),")
+    emit("-- decoded reply / raw output out")
     emit("setmetatable(M, { __call = function(_, body) return ensure()(body) end })")
   else
     assert(sjson, "no schema for workload '" .. name .. "': " .. tostring(err))
