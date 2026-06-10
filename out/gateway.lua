@@ -30,75 +30,7 @@ local inflight = {}   -- reqid -> { from = senderid, t = clock }
 local cooldown = {}   -- wname -> { [wid] = clock of last assign failure }
 local started = os.clock()
 
--- ---- monitor dashboard ---------------------------------------------------------
-local mon = (type(peripheral) == "table" and peripheral.find) and peripheral.find("monitor") or nil
-local LOG = {}
-local draw -- fwd
-
-local function dlog(msg)
-  local line = ("[%6ds] %s"):format(os.clock() - started, msg)
-  print(line)
-  LOG[#LOG + 1] = line
-  while #LOG > 60 do table.remove(LOG, 1) end
-  if draw then pcall(draw) end
-end
-
-draw = function()
-  if not mon then return end
-  mon.setTextScale(0.5)
-  local W, H = mon.getSize()
-  local colour = mon.isColour and mon.isColour()
-  local function c(fg) if colour then mon.setTextColour(fg) end end
-  mon.setBackgroundColour(colours.black)
-  mon.clear()
-  local y = 1
-  local function line(txt, fg)
-    if y > H then return end
-    mon.setCursorPos(1, y)
-    c(fg or colours.white)
-    mon.write(txt:sub(1, W))
-    y = y + 1
-  end
-  local nworkers, inflight_n = 0, 0
-  for _ in pairs(workers) do nworkers = nworkers + 1 end
-  for _ in pairs(inflight) do inflight_n = inflight_n + 1 end
-  line(("crabcraft gateway '%s'   up %ds   workers %d   inflight %d")
-    :format(name, os.clock() - started, nworkers, inflight_n), colours.yellow)
-  y = y + 1
-  line("WORKLOADS", colours.lightBlue)
-  local any = false
-  for wname, spec in pairs(registry) do
-    any = true
-    local p = placements[wname]
-    local state = p and (p.state or "?") or "pending"
-    local fg = state == "running" and colours.lime
-      or state == "assigning" and colours.yellow or colours.orange
-    line(("  %-14s %-8s %-10s %s"):format(wname, spec.kind or "?", state,
-      p and ("worker " .. p.worker .. " " .. p.slot) or "unscheduled"), fg)
-  end
-  if not any then line("  (none deployed - crb deploy <manifest.yml>)", colours.grey) end
-  y = y + 1
-  line("WORKERS", colours.lightBlue)
-  any = false
-  for wid, w in pairs(workers) do
-    any = true
-    local alive = os.clock() - w.last < 20
-    local total, free = 0, 0
-    for _, wl in pairs(w.slots) do
-      total = total + 1
-      if wl == false then free = free + 1 end
-    end
-    line(("  #%-4d %-12s %d/%d slots free   %s"):format(wid, tostring(w.label),
-      free, total, alive and "alive" or "LOST"), alive and colours.lime or colours.red)
-  end
-  if not any then line("  (none registered - start worker computers)", colours.grey) end
-  y = y + 1
-  line(("LOG"):format(), colours.lightBlue)
-  local room = H - y
-  for i = math.max(1, #LOG - room + 1), #LOG do
-    line("  " .. LOG[i], colours.grey)
-  end
-end
+local function dlog(msg) print(("[%6ds] %s"):format(os.clock() - started, msg)) end
 
 local function respond(to, reply, id)
   reply.id = id
@@ -205,7 +137,6 @@ local function handle(sender, msg)
         local p = s.workload and placements[s.workload]
         if p and p.worker == sender then p.state = s.state or "running" end
       end
-      if draw then pcall(draw) end
     end
   elseif t == "deploy" then
     if not msg.name or not msg.url then
@@ -296,12 +227,10 @@ spawn(function()
     repeat local ev, p = os.pullEvent("timer") until p == timer
     local ok, err = pcall(reconcile)
     if not ok then dlog("reconcile error: " .. tostring(err)) end
-    if draw then pcall(draw) end
   end
 end)
 
 print(("gateway '%s' up on protocol '%s' - control loop every 5s"):format(name, PROTO))
-if mon then dlog("dashboard on monitor") else print("(no monitor attached - dashboard off)") end
 local ev = {}
 while true do
   for i = #tasks, 1, -1 do

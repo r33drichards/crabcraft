@@ -1,0 +1,55 @@
+{
+  "worlds": [
+    {
+      "name": "caller",
+      "imports": {},
+      "exports": {
+        "interface-0": {
+          "interface": {
+            "id": 0
+          }
+        }
+      },
+      "package": 0
+    }
+  ],
+  "interfaces": [
+    {
+      "name": "relay",
+      "types": {},
+      "functions": {
+        "greet-via": {
+          "name": "greet-via",
+          "kind": "freestanding",
+          "params": [
+            {
+              "name": "target",
+              "type": "string"
+            },
+            {
+              "name": "name",
+              "type": "string"
+            }
+          ],
+          "result": "string"
+        }
+      },
+      "package": 0
+    }
+  ],
+  "types": [],
+  "packages": [
+    {
+      "name": "crab:caller@0.1.0",
+      "docs": {
+        "contents": "crabcraft mesh-caller interface: relays greetings through the service mesh.\ngreet-via(target, name) mesh-calls `crab:hello/greeter@0.1.0#greet` on the\nworkload named `target` and returns \"via mesh: \" + its reply — guests\naddress services BY NAME; placement belongs to the gateway."
+      },
+      "interfaces": {
+        "relay": 0
+      },
+      "worlds": {
+        "caller": 0
+      }
+    }
+  ]
+}
