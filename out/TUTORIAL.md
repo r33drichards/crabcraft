@@ -39,7 +39,7 @@ a few minutes. After that, invokes answer in seconds.
 | `picatd` daemon on one computer | `kind: session` workload placed on some worker's disk by the gateway |
 | `picatd --install` | `worker --install` (and the gateway re-places workloads after any reboot) |
 | `pic <daemon> <goal>` one-shots | `fib`-style scripts via the client library, or `crb invoke` |
-| `pic -n foo` named sessions | one warm session per deployed workload; deploy `picat2.yml` (same wasm, different `name:`) for more |
+| `pic -n foo` named sessions | `-s foo` on invokes: per-session engines + state, booted on demand, executing concurrently |
 | daemon monitor dashboard | gateway monitor dashboard (workloads, workers, versions, log) |
 | manual file copies to update | `crb update` rolls the whole fleet |
 | daemon id caching, liveness polling in `pic` | done by the gateway + client library; you just call |
@@ -134,8 +134,9 @@ print(picat("main => println(fib(10)).\nfib(0)=1.\nfib(1)=1.\nfib(N)=fib(N-1)+fi
 - **Placement is the gateway's job.** The workload may land on any worker
   with a free disk; its files (programs, anything it writes) live on that
   floppy and survive reboots. `crb ls` shows where everything is.
-- **Latency profile**: deploy-time boot is minutes (once); warm invokes are
-  seconds plus your program's runtime. The client waits up to 120s by default.
+- **Latency profile**: deploy-time boot is minutes (once per session, on a
+  session's first use); warm invokes are seconds plus your program's runtime.
+  The client waits up to 300s.
 - **Timeouts mean look at the dashboard.** `workload 'picat' is not running
   (state: ...)` right after a gateway reboot is the reconciler converging;
   retry in ~10s. Persistent `assign FAILED ... fetch failed` usually means
