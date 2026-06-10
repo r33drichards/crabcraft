@@ -7,9 +7,13 @@
 
 pub mod abi;
 pub mod codec;
+#[cfg(all(feature = "mesh", target_arch = "wasm32"))]
+pub mod mesh;
 pub mod value;
 pub mod vectors;
 
 pub use abi::Registry;
+#[cfg(all(feature = "mesh", target_arch = "wasm32"))]
+pub use mesh::mesh_call;
 pub use codec::{decode, decode_params, encode, encode_to_vec, Decoder};
 pub use value::{Type, Value};

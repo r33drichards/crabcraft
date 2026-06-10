@@ -1,0 +1,11 @@
+[package]
+name = "caller"
+version = "0.1.0"
+edition = "2021"
+description = "crabcraft mesh caller module: crab:caller/relay@0.1.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+crab-sdk = { path = "../crab-sdk", features = ["mesh"] }

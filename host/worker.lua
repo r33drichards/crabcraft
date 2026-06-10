@@ -42,7 +42,7 @@ local function fexists(p)
 end
 local function mkdir(p)
   if type(fs) == "table" then fs.makeDir(p)
-  else os.execute and os.execute("mkdir -p '" .. p .. "'") end
+  elseif os.execute then os.execute("mkdir -p '" .. p .. "'") end
 end
 local function readfile(p)
   if type(fs) == "table" and fs.open then

@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 description = "Guest-side SDK for crabcraft wasm modules: WIRE.md value codec + ABI exports"
 
+[features]
+# Opt-in service mesh import (WIRE.md section 2, crabcraft.call). Off by
+# default so plain modules (hello) never link the crabcraft.call import.
+mesh = []
+
 [lib]
 name = "crab_sdk"
 

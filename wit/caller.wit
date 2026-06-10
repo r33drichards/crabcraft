@@ -1,0 +1,13 @@
+// crabcraft mesh-caller interface: relays greetings through the service mesh.
+// greet-via(target, name) mesh-calls `crab:hello/greeter@0.1.0#greet` on the
+// workload named `target` and returns "via mesh: " + its reply — guests
+// address services BY NAME; placement belongs to the gateway.
+package crab:caller@0.1.0;
+
+interface relay {
+  greet-via: func(target: string, name: string) -> string;
+}
+
+world caller {
+  export relay;
+}
