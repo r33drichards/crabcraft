@@ -847,8 +847,8 @@ function M.connect(gwname, opts)
   end
 
   function C:_proxy(name, sjson, kind)
-    if kind == "command" then
-      -- command kind: one callable taking/returning JSON-able tables
+    if kind == "command" or kind == "session" then
+      -- command/session kinds: one callable; strings pass through verbatim
       return setmetatable({}, { __call = function(_, body)
         local r = self:request({ type = "invoke", name = name,
           body = type(body) == "string" and body or json.encode(body) }, 120)
@@ -929,7 +929,7 @@ local cmd = args[1]
 if not cmd then
   print("usage:")
   print("  crb deploy <file.yml>")
-  print("  crb ls | schema <name> | rm <name> | purge")
+  print("  crb ls | schema <name> | rm <name> | purge | update")
   print("  crb invoke <name> <func> [key=value ...]")
   print("  crb gen <name> [outfile]      (generate a typed Lua client)")
   print("  (-g <gateway> anywhere to pick a gateway)")
@@ -993,15 +993,15 @@ elseif cmd == "ls" then
   end
   print("WORKERS")
   for _, w in ipairs(r.workers or {}) do
-    print(("  #%-4d %-12s free-slots=%d %s"):format(w.id, tostring(w.label), w.free,
-      w.alive and "alive" or "LOST"))
+    print(("  #%-4d %-12s v%-7s free-slots=%d %s"):format(w.id, tostring(w.label),
+      tostring(w.version or "?"), w.free, w.alive and "alive" or "LOST"))
   end
 
 elseif cmd == "schema" then
   local name = assert(args[2], "crb schema <name>")
   local C = client.connect(GW)
   local sjson, err, kind = C:schema(name)
-  if kind == "command" then print(name .. ": command kind (JSON in -> JSON out)") return end
+  if kind == "command" or kind == "session" then print(name .. ": " .. kind .. " kind (body in -> output out)") return end
   if not sjson then print("FAILED: " .. tostring(err)) return end
   local sc = schema_mod.load(sjson)
   for _, addr in ipairs(sc.list()) do
@@ -1140,6 +1140,21 @@ elseif cmd == "remove" or cmd == "rm" or cmd == "del" or cmd == "delete" then
   local C = client.connect(GW)
   local r = C:remove(assert(args[2], "crb rm <name>"))
   print(r.ok and r.output or ("FAILED: " .. tostring(r.err)))
+
+elseif cmd == "update" then
+  -- crb update            -> roll out latest worker.lua to all workers, then
+  --                          the gateway updates itself (reboots)
+  -- crb update workers    -> workers only
+  local what = args[2] or "all"
+  local C = client.connect(GW)
+  if what == "all" or what == "workers" then
+    local r = C:request({ type = "update-workers" })
+    print(r.ok and r.output or ("FAILED: " .. tostring(r.err)))
+  end
+  if what == "all" or what == "gateway" then
+    local r = C:request({ type = "update-gateway" }, 30)
+    print(r.ok and r.output or ("FAILED: " .. tostring(r.err)))
+  end
 
 elseif cmd == "purge" then
   local C = client.connect(GW)

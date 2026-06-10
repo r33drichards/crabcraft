@@ -385,6 +385,10 @@ local function handle(sender, msg)
       inflight[msg.id] = nil
       respond(e.from, { ok = msg.ok, result = msg.result, err = msg.err }, msg.id)
     end
+  elseif msg.id and t then
+    -- version-skew safety: an unknown request fails loud instead of timing out
+    respond(sender, { ok = false, err = "gateway v" .. CRAB_VERSION ..
+      " does not understand '" .. tostring(t) .. "' - update the gateway" }, msg.id)
   end
 end
 

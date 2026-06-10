@@ -847,8 +847,8 @@ function M.connect(gwname, opts)
   end
 
   function C:_proxy(name, sjson, kind)
-    if kind == "command" then
-      -- command kind: one callable taking/returning JSON-able tables
+    if kind == "command" or kind == "session" then
+      -- command/session kinds: one callable; strings pass through verbatim
       return setmetatable({}, { __call = function(_, body)
         local r = self:request({ type = "invoke", name = name,
           body = type(body) == "string" and body or json.encode(body) }, 120)
