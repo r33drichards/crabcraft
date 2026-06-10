@@ -171,14 +171,13 @@ local function reconcile()
     if not w or os.clock() - w.last > 20 then
       dlog(("reconcile: worker %s lost - unplacing '%s'"):format(tostring(p.worker), wname))
       placements[wname] = nil
-    elseif p.state == "assigning" then
-      p.age = (p.age or 0) + 1
-      if p.age > 3 and w.slots[p.slot] ~= wname then
-        dlog(("reconcile: '%s' never started on worker %d - retrying elsewhere"):format(wname, p.worker))
-        cooldown[wname] = cooldown[wname] or {}
-        cooldown[wname][p.worker] = os.clock()
-        placements[wname] = nil
-      end
+    elseif (p.hbm or 0) >= 2 then
+      -- two consecutive heartbeats contradicted this placement: it is gone
+      -- (heartbeats are the freshness signal - reconcile ticks are not)
+      dlog(("reconcile: '%s' contradicted by worker %d heartbeats - retrying"):format(wname, p.worker))
+      cooldown[wname] = cooldown[wname] or {}
+      cooldown[wname][p.worker] = os.clock()
+      placements[wname] = nil
     end
   end
   -- adopt orphans: a slot already running this workload (e.g. from a disk
@@ -281,8 +280,21 @@ local function handle(sender, msg)
       for _, s in ipairs(msg.slots or {}) do
         w.slots[s.disk] = s.workload or false
         w.states[s.disk] = s.state
-        local p = s.workload and placements[s.workload]
-        if p and p.worker == sender then p.state = s.state or "running" end
+      end
+      for wname, p in pairs(placements) do
+        if p.worker == sender then
+          local slotw = w.slots[p.slot]
+          local slots_state = w.states[p.slot]
+          if slotw == wname and slots_state == "running" then
+            p.state = "running"
+            p.hbm = 0
+          elseif slotw == wname then
+            p.state = slots_state or p.state -- loading: hold, neither way
+          else
+            -- this heartbeat contradicts the placement (slot empty/other)
+            p.hbm = (p.hbm or 0) + 1
+          end
+        end
       end
       if draw then pcall(draw) end
     end
@@ -374,6 +386,16 @@ local function handle(sender, msg)
       func = msg.func, params = msg.params, body = msg.body }, PROTO)
   elseif msg.id and tostring(msg.id):match("^asg:") and msg.ok ~= nil then
     local wname = tostring(msg.id):sub(5)
+    if msg.ok == true then
+      -- TLC-verified: confirm via the reply, not via view convergence -
+      -- otherwise the age-out can unplace a healthy assignment seen through
+      -- a stale view and the cluster livelocks (spec/crabcraft.tla)
+      local p = placements[wname]
+      if p and p.worker == sender then
+        p.state = "running"
+        p.hbm = 0
+      end
+    end
     if msg.ok == false then
       dlog(("assign '%s' FAILED on worker %d: %s"):format(wname, sender, tostring(msg.err)))
       cooldown[wname] = cooldown[wname] or {}
