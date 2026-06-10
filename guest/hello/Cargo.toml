@@ -1,0 +1,11 @@
+[package]
+name = "hello"
+version = "0.1.0"
+edition = "2021"
+description = "crabcraft hello module: crab:hello/greeter@0.1.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+crab-sdk = { path = "../crab-sdk" }

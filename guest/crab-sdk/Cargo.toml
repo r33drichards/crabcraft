@@ -1,0 +1,12 @@
+[package]
+name = "crab-sdk"
+version = "0.1.0"
+edition = "2021"
+description = "Guest-side SDK for crabcraft wasm modules: WIRE.md value codec + ABI exports"
+
+[lib]
+name = "crab_sdk"
+
+[[bin]]
+name = "gen-vectors"
+path = "src/bin/gen_vectors.rs"
