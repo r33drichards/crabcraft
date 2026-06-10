@@ -62,9 +62,9 @@ schema: https://github.com/r33drichards/crabcraft/releases/latest/download/sqlit
 ```
 crb deploy sqlite.yml
 crb ls
-crb invoke sqlite exec {"sql":"CREATE TABLE pets(name,kind)"}
-crb invoke sqlite exec {"sql":"INSERT INTO pets VALUES('ferris','crab')"}
-crb invoke sqlite exec {"sql":"SELECT * FROM pets"}
+crb invoke sqlite exec CREATE TABLE pets(name,kind)
+crb invoke sqlite exec INSERT INTO pets VALUES('ferris','crab')
+crb invoke sqlite exec SELECT * FROM pets
 ```
 The database file lives on whichever worker's floppy the scheduler picked —
 survives reboots, travels with the disk.

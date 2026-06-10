@@ -919,7 +919,6 @@ if not cmd then
   print("  crb deploy <file.yml>")
   print("  crb ls | schema <name> | remove <name>")
   print("  crb invoke <name> <func> [key=value ...]")
-  print("  crb sql <statement...>        (alias: invoke sqlite exec)")
   print("  (-g <gateway> anywhere to pick a gateway)")
   return
 end
@@ -1002,20 +1001,14 @@ elseif cmd == "schema" then
       f.result and (" -> " .. (type(f.result) == "string" and f.result or f.result.kind)) or ""))
   end
 
-elseif cmd == "invoke" or cmd == "call" or cmd == "sql" then
+elseif cmd == "invoke" or cmd == "call" then
   -- GENERIC, schema-driven invocation. Argument forms, decided by the
   -- function's own WIT signature:
   --   exactly one string-typed param  -> the whole tail is that string
   --   anything else                   -> key=value pairs (or raw JSON)
-  -- `crb sql <stmt...>` is a pure alias for `crb invoke sqlite exec <stmt...>`.
-  local name, func, from
-  if cmd == "sql" then
-    name, func, from = "sqlite", "exec", 2
-  else
-    name = assert(args[2], "crb invoke <name> <func> [args...]")
-    func = assert(args[3], "crb invoke <name> <func> [args...]")
-    from = 4
-  end
+  local name = assert(args[2], "crb invoke <name> <func> [args...]")
+  local func = assert(args[3], "crb invoke <name> <func> [args...]")
+  local from = 4
   local C = client.connect(GW)
   local w = C:workload(name)
   local argv
