@@ -1,0 +1,4 @@
+name: sqlite
+wasm: https://github.com/r33drichards/crabcraft/releases/latest/download/sqlite.wasm
+kind: reactor
+schema: https://github.com/r33drichards/crabcraft/releases/latest/download/sqlite.json

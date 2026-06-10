@@ -18,6 +18,11 @@ def slurp(p):
 def lua_str(s):
     return json.dumps(s, ensure_ascii=False)
 
+VERSION = slurp("VERSION").strip()
+
+def stamp(src):
+    return src.replace('local CRAB_VERSION = "dev"', f'local CRAB_VERSION = "{VERSION}"')
+
 LIBS = {n: slurp(f"host/{n}.lua") for n in
         ["json", "cmval", "schema", "yaml", "runtime", "client"]}
 
@@ -57,11 +62,11 @@ os.makedirs("dist", exist_ok=True)
 
 # gateway: standalone already
 with open("dist/gateway.lua", "w") as f:
-    f.write("-- crabcraft gateway (amalgamated; see host/gateway.lua)\n" + slurp("host/gateway.lua"))
+    f.write("-- crabcraft gateway (amalgamated; see host/gateway.lua)\n" + stamp(slurp("host/gateway.lua")))
 
 # worker: libs + engine bootstrap
 with open("dist/worker.lua", "w") as f:
-    f.write(amalgamate(slurp("host/worker.lua"),
+    f.write(amalgamate(stamp(slurp("host/worker.lua")),
                        ["json", "cmval", "schema", "runtime"],
                        "-- crabcraft worker (amalgamated; see host/)\n" + BOOTSTRAP))
 

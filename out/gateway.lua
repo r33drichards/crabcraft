@@ -221,7 +221,8 @@ local function reconcile()
         workers[wid].slots[slot] = wname -- optimistic; heartbeat confirms
         dlog(("reconcile: assigning '%s' -> worker %d slot %s"):format(wname, wid, slot))
         rednet.send(wid, { type = "assign", slot = slot, name = wname,
-          url = spec.url, kind = spec.kind, warm = spec.warm, id = "asg:" .. wname }, PROTO)
+          url = spec.url, kind = spec.kind, warm = spec.warm,
+          args = spec.args, body_file = spec.body_file, id = "asg:" .. wname }, PROTO)
       end
     end
   end
@@ -286,7 +287,7 @@ local function handle(sender, msg)
         "' already deployed - crb remove " .. msg.name .. " first (or deploy force=true)" }, msg.id)
       return
     end
-    registry[msg.name] = { url = msg.url, kind = msg.kind or "reactor", schema = msg.schema, warm = msg.warm }
+    registry[msg.name] = { url = msg.url, kind = msg.kind or "reactor", schema = msg.schema, warm = msg.warm, args = msg.args, body_file = msg.body_file }
     save_registry()
     dlog(("deploy '%s' (%s) registered"):format(msg.name, msg.kind or "reactor"))
     respond(sender, { ok = true, output = "registered " .. msg.name }, msg.id)

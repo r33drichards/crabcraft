@@ -3,6 +3,8 @@
 -- worker slots, and routes invoke traffic. Run on a CC computer with a modem:
 --   gateway [name]            (default name "gateway")
 local PROTO = "crabcraft"
+local CRAB_VERSION = "dev" -- stamped by tools/amalgamate.py
+local GATEWAY_URL = "https://github.com/r33drichards/crabcraft/releases/latest/download/gateway.lua"
 local args = { ... }
 -- --install: relaunch on every boot (daemon computers reboot on chunk unload)
 if args[1] == "--install" and type(fs) == "table" then
@@ -87,8 +89,8 @@ draw = function()
   local nworkers, inflight_n = 0, 0
   for _ in pairs(workers) do nworkers = nworkers + 1 end
   for _ in pairs(inflight) do inflight_n = inflight_n + 1 end
-  line(("crabcraft gateway '%s'   up %ds   workers %d   inflight %d")
-    :format(name, os.clock() - started, nworkers, inflight_n), colours.yellow)
+  line(("crabcraft gateway '%s' v%s   up %ds   workers %d   inflight %d")
+    :format(name, CRAB_VERSION, os.clock() - started, nworkers, inflight_n), colours.yellow)
   y = y + 1
   line("WORKLOADS", colours.lightBlue)
   local any = false
@@ -113,8 +115,9 @@ draw = function()
       total = total + 1
       if wl == false then free = free + 1 end
     end
-    line(("  #%-4d %-12s %d/%d free  %s"):format(wid, tostring(w.label),
-      free, total, alive and "alive" or "LOST"), alive and colours.lime or colours.red)
+    line(("  #%-4d %-12s v%-7s %d/%d free  %s"):format(wid, tostring(w.label),
+      tostring(w.version or "?"), free, total, alive and "alive" or "LOST"),
+      alive and colours.lime or colours.red)
     for slot, wl in pairs(w.slots) do
       if wl == false then
         line(("    %-8s (free)"):format(slot), colours.grey)
@@ -241,7 +244,7 @@ local function handle(sender, msg)
   elseif t == "register" then
     local slots = {}
     for _, s in ipairs(msg.slots or {}) do slots[s.disk] = s.workload or false end
-    workers[sender] = { label = msg.worker, slots = slots, last = os.clock() }
+    workers[sender] = { label = msg.worker, slots = slots, last = os.clock(), version = msg.version }
     dlog(("worker %d (%s) registered with %d slot(s)"):format(sender, tostring(msg.worker), #(msg.slots or {})))
     -- adopt existing placements (worker reboot recovery)
     for _, s in ipairs(msg.slots or {}) do
@@ -258,7 +261,7 @@ local function handle(sender, msg)
       -- heartbeat (picatd lesson: never depend on in-memory state surviving)
       local slots = {}
       for _, sl in ipairs(msg.slots or {}) do slots[sl.disk] = sl.workload or false end
-      workers[sender] = { label = msg.worker, slots = slots, last = os.clock() }
+      workers[sender] = { label = msg.worker, slots = slots, last = os.clock(), version = msg.version }
       w = workers[sender]
       dlog(("adopted worker %d (%s) from heartbeat"):format(sender, tostring(msg.worker)))
       for _, sl in ipairs(msg.slots or {}) do
@@ -269,6 +272,7 @@ local function handle(sender, msg)
     end
     if w then
       w.last = os.clock()
+      if msg.version then w.version = msg.version end
       for _, s in ipairs(msg.slots or {}) do
         w.slots[s.disk] = s.workload or false
         local p = s.workload and placements[s.workload]
@@ -312,6 +316,26 @@ local function handle(sender, msg)
     save_registry()
     placements[msg.name] = nil
     respond(sender, { ok = true, output = "removed " .. tostring(msg.name) }, msg.id)
+  elseif t == "update-workers" then
+    local n = 0
+    for wid in pairs(workers) do
+      rednet.send(wid, { type = "update", url = msg.url, id = "upd:" .. wid }, PROTO)
+      n = n + 1
+    end
+    dlog(("rollout: update sent to %d worker(s)"):format(n))
+    respond(sender, { ok = true, output = ("update sent to %d worker(s)"):format(n) }, msg.id)
+  elseif t == "update-gateway" then
+    local r = http and http.get(msg.url or GATEWAY_URL, nil, true)
+    if not r then
+      respond(sender, { ok = false, err = "fetch failed" }, msg.id)
+    else
+      local me = (shell and shell.getRunningProgram and shell.getRunningProgram()) or "gateway"
+      local h = fs.open(me, "wb") h.write(r.readAll()) h.close() r.close()
+      respond(sender, { ok = true, output = "gateway updated - rebooting" }, msg.id)
+      dlog("self-update: rebooting")
+      os.sleep(0.5)
+      os.reboot()
+    end
   elseif t == "list" then
     local out = {}
     for wname, spec in pairs(registry) do
@@ -324,7 +348,7 @@ local function handle(sender, msg)
       local free = 0
       for _, wl in pairs(w.slots) do if wl == false then free = free + 1 end end
       ws[#ws + 1] = { id = wid, label = w.label, free = free,
-        alive = os.clock() - w.last < 20 }
+        alive = os.clock() - w.last < 20, version = w.version }
     end
     respond(sender, { ok = true, workloads = out, workers = ws }, msg.id)
   elseif t == "schema" then

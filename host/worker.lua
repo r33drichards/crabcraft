@@ -3,6 +3,8 @@
 --   worker [gatewayName]      (default: first crabcraft host found)
 -- Needs beside it: runtime.lua, cmval.lua, json.lua, and the wasmcraft bundle.
 local PROTO = "crabcraft"
+local CRAB_VERSION = "dev" -- stamped by tools/amalgamate.py
+local WORKER_URL = "https://github.com/r33drichards/crabcraft/releases/latest/download/worker.lua"
 local args = { ... }
 if args[1] == "--install" and type(fs) == "table" then
   table.remove(args, 1)
@@ -123,7 +125,7 @@ local function slot_list()
   local out = {}
   for sname, s in pairs(slots) do
     out[#out + 1] = { disk = sname, workload = s.meta and s.meta.name or nil,
-      state = s.meta and (s.w and "running" or (s.meta.kind == "command" and s.module and "running" or "loading")) or nil }
+      state = s.meta and ((s.w or s.session or (s.meta.kind == "command" and s.module)) and "running" or "loading") or nil }
   end
   return out
 end
@@ -148,6 +150,23 @@ local function mesh_call(target, func, params)
   return false, "mesh call timed out: " .. target
 end
 
+-- ---- picat session support (kind = "session") -------------------------------------
+-- Warm interpreter sessions: boot once at assign, each invoke loads + runs the
+-- program in the live REPL (no per-call runtime boot). v0: Picat only.
+local PICATLIB_URL = "https://github.com/r33drichards/wasmcraft/releases/latest/download/picat.lua"
+local picatlib
+local function get_picatlib()
+  if picatlib then return picatlib end
+  if not fexists("picatlib") then
+    if not http then error("session kind needs http to fetch picat.lua") end
+    local r = assert(http.get(PICATLIB_URL), "cannot fetch picat.lua")
+    writefile("picatlib", r.readAll())
+    r.close()
+  end
+  picatlib = dofile("picatlib")
+  return picatlib
+end
+
 -- ---- workload lifecycle ----------------------------------------------------------
 local function start_slot(sname)
   local s = slots[sname]
@@ -158,16 +177,21 @@ local function start_slot(sname)
   -- request (and every command-kind re-instantiate) is served from the cache.
   -- warm: false in the manifest skips it (functions then compile on first use).
   local wc = rt.engine()
-  s.module = wc.load(wasm)
+  if s.meta.kind ~= "session" then s.module = wc.load(wasm) end
   s.cache = {}
-  if s.meta.warm ~= false and wc.precompile_cache then
+  if s.meta.kind ~= "session" and s.meta.warm ~= false and wc.precompile_cache then
     local t0 = os.clock()
     local cache, n, fb = wc.precompile_cache(s.module, "transpile")
     s.cache = cache
     print(("worker: '%s' transpiled %d fns%s in %s (%.1fs)"):format(s.meta.name, n,
       fb > 0 and (" (" .. fb .. " interp)") or "", sname, os.clock() - t0))
   end
-  if s.meta.kind == "command" then
+  if s.meta.kind == "session" then
+    local t0 = os.clock()
+    local plib = get_picatlib()
+    s.session = plib.session({ module = wasm, root = s.dir, mode = "transpile" })
+    print(("worker: '%s' (session) warm in %s (%.1fs)"):format(s.meta.name, sname, os.clock() - t0))
+  elseif s.meta.kind == "command" then
     print(("worker: '%s' (command) ready in %s"):format(s.meta.name, sname))
   else
     local t0 = os.clock()
@@ -206,7 +230,8 @@ end
 local function drain(msg)
   local s = slots[msg.slot]
   if s then
-    s.meta, s.w, s.module = nil, nil, nil
+    if s.session then pcall(function() s.session:close() end) end
+    s.meta, s.w, s.module, s.session = nil, nil, nil, nil
     delfile(s.dir .. "/crab-meta.json")
     delfile(s.dir .. "/workload.wasm")
     print("worker: drained " .. msg.slot)
@@ -222,6 +247,12 @@ end
 local function do_invoke(msg)
   local s = find_workload(msg.name)
   if not s then return { ok = false, err = "workload not here: " .. tostring(msg.name) } end
+  if s.meta.kind == "session" then
+    if not s.session then return { ok = false, err = "session still booting" } end
+    local ok, out = pcall(function() return s.session:run(msg.body or "", "req.pi") end)
+    if not ok then return { ok = false, err = "session error: " .. tostring(out) } end
+    return { ok = true, result = out }
+  end
   if s.meta.kind == "command" then
     local body = msg.body or ""
     local stdin_body = body
@@ -259,7 +290,21 @@ spawn(function() -- receiver
   while true do
     local sender, msg = rednet.receive(PROTO)
     if type(msg) == "table" then
-      if msg.type == "invoke-reply" or (msg.id and tostring(msg.id):match("^mesh:") and msg.ok ~= nil) then
+      if msg.type == "update" and sender == gw then
+        -- gateway-ordered rollout: refetch self and reboot (startup relaunches)
+        print("worker: updating from " .. (msg.url or WORKER_URL))
+        local r = http and http.get(msg.url or WORKER_URL, nil, true)
+        if r then
+          local me = (shell and shell.getRunningProgram and shell.getRunningProgram()) or "worker"
+          local h = fs.open(me, "wb") h.write(r.readAll()) h.close() r.close()
+          rednet.send(sender, { ok = true, id = msg.id }, PROTO)
+          print("worker: updated - rebooting")
+          os.sleep(0.5)
+          os.reboot()
+        else
+          rednet.send(sender, { ok = false, err = "fetch failed", id = msg.id }, PROTO)
+        end
+      elseif msg.type == "invoke-reply" or (msg.id and tostring(msg.id):match("^mesh:") and msg.ok ~= nil) then
         mesh_replies[msg.id] = msg
         os.queueEvent("crab_mesh")
       elseif msg.type == "assign" or msg.type == "invoke" or msg.type == "drain" then
@@ -290,10 +335,10 @@ local function slot_task(sname, s)
           local r = assign(m)
           r.id = m.id
           rednet.send(job.sender, r, PROTO)
-          rednet.send(gw, { type = "heartbeat", worker = label, slots = slot_list() }, PROTO)
+          rednet.send(gw, { type = "heartbeat", worker = label, slots = slot_list(), version = CRAB_VERSION }, PROTO)
         elseif m.type == "drain" then
           drain(m)
-          rednet.send(gw, { type = "heartbeat", worker = label, slots = slot_list() }, PROTO)
+          rednet.send(gw, { type = "heartbeat", worker = label, slots = slot_list(), version = CRAB_VERSION }, PROTO)
         elseif m.type == "invoke" then
           local ok, r = pcall(do_invoke, m)
           if not ok then r = { ok = false, err = "worker error: " .. tostring(r) } end
@@ -312,7 +357,7 @@ spawn(function() -- boot: recover disks, register, then idle
       if not ok then print("worker: recover " .. sname .. " failed: " .. tostring(err)) end
     end
   end
-  rednet.send(gw, { type = "register", worker = label, slots = slot_list(), id = "reg" }, PROTO)
+  rednet.send(gw, { type = "register", worker = label, slots = slot_list(), version = CRAB_VERSION, id = "reg" }, PROTO)
 end)
 
 for sname, s in pairs(slots) do
@@ -323,7 +368,7 @@ spawn(function() -- heartbeat
   while true do
     local timer = os.startTimer(5)
     repeat local _, p = os.pullEvent("timer") until p == timer
-    rednet.send(gw, { type = "heartbeat", worker = label, slots = slot_list() }, PROTO)
+    rednet.send(gw, { type = "heartbeat", worker = label, slots = slot_list(), version = CRAB_VERSION }, PROTO)
   end
 end)
 

@@ -1,11 +1,6 @@
-# Picat as a crabcraft workload: the wasi command module runs req.pi (the
-# invoke body, written to the volume) on each call. warm: false skips eager
-# whole-module transpile - 5.3MB of Picat compiles lazily into the slot cache
-# on first invoke, so later calls are fast.
+# Picat as a WARM crabcraft workload (picatd-style): the worker boots one
+# Picat session at deploy and keeps it alive; each invoke loads your program
+# into the live REPL and runs main - no per-call runtime boot.
 name: picat
 wasm: https://github.com/r33drichards/wasmcraft/releases/latest/download/picat.wasm
-kind: command
-body-file: req.pi
-args:
-  - req.pi
-warm: false
+kind: session

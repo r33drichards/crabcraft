@@ -821,10 +821,12 @@ function M.run_command(bytes, body, opts)
   local module = opts.module or wc.load(bytes)
   local out = {}
   local input, pos = (body or "") .. "\n", 1
+  local argt = { opts.name or "workload" }
+  for _, a in ipairs(opts.argv or {}) do argt[#argt + 1] = tostring(a) end
   local host = wc.wasi.make({
     fs = (wc.hostfs and wc.hostfs(opts.root or ".")) or nil,
     root = opts.root or ".",
-    args = { opts.name or "workload" },
+    args = argt,
     stdin = function(maxlen)
       if pos > #input then return "" end
       local c = input:sub(pos, pos + maxlen - 1)
@@ -1041,7 +1043,8 @@ local function assign(msg)
     r.close()
   end
   writefile(s.dir .. "/workload.wasm", wasm)
-  s.meta = { name = msg.name, kind = msg.kind or "reactor", url = msg.url, warm = msg.warm }
+  s.meta = { name = msg.name, kind = msg.kind or "reactor", url = msg.url, warm = msg.warm,
+    args = msg.args, body_file = msg.body_file }
   s.cache = {} -- new workload, fresh transpile cache
   writefile(s.dir .. "/crab-meta.json", json.encode(s.meta))
   s.w, s.module = nil, nil
@@ -1070,8 +1073,16 @@ local function do_invoke(msg)
   local s = find_workload(msg.name)
   if not s then return { ok = false, err = "workload not here: " .. tostring(msg.name) } end
   if s.meta.kind == "command" then
-    local out, err = rt.run_command(nil, msg.body or "", { module = s.module, root = s.dir,
-      name = s.meta.name, mode = "transpile", chunk_cache = s.cache })
+    local body = msg.body or ""
+    local stdin_body = body
+    if s.meta.body_file then
+      -- custom-runtime pattern: the body becomes a file on the volume and the
+      -- module runs with manifest argv (e.g. an interpreter running a program)
+      writefile(s.dir .. "/" .. s.meta.body_file, body)
+      stdin_body = ""
+    end
+    local out, err = rt.run_command(nil, stdin_body, { module = s.module, root = s.dir,
+      name = s.meta.name, mode = "transpile", chunk_cache = s.cache, argv = s.meta.args })
     if not out then return { ok = false, err = err } end
     return { ok = true, result = out }
   end
