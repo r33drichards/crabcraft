@@ -4,7 +4,7 @@
 -- worker slots, and routes invoke traffic. Run on a CC computer with a modem:
 --   gateway [name]            (default name "gateway")
 local PROTO = "crabcraft"
-local CRAB_VERSION = "0.2.1" -- stamped by tools/amalgamate.py
+local CRAB_VERSION = "0.2.2" -- stamped by tools/amalgamate.py
 local GATEWAY_URL = "https://github.com/r33drichards/crabcraft/releases/latest/download/gateway.lua"
 local args = { ... }
 -- --install: relaunch on every boot (daemon computers reboot on chunk unload)
@@ -386,6 +386,10 @@ local function handle(sender, msg)
       inflight[msg.id] = nil
       respond(e.from, { ok = msg.ok, result = msg.result, err = msg.err }, msg.id)
     end
+  elseif msg.id and t then
+    -- version-skew safety: an unknown request fails loud instead of timing out
+    respond(sender, { ok = false, err = "gateway v" .. CRAB_VERSION ..
+      " does not understand '" .. tostring(t) .. "' - update the gateway" }, msg.id)
   end
 end
 

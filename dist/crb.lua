@@ -840,7 +840,7 @@ function M.connect(gwname, opts)
   -- the factory: a proxy whose methods are the workload's WIT functions
   function C:workload(name)
     local sjson, err, kind = self:schema(name)
-    if sjson == nil and kind ~= "command" then
+    if sjson == nil and kind ~= "command" and kind ~= "session" then
       error("no schema for workload '" .. name .. "': " .. tostring(err), 0)
     end
     return self:_proxy(name, sjson, kind)

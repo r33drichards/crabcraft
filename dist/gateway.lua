@@ -4,7 +4,7 @@
 -- worker slots, and routes invoke traffic. Run on a CC computer with a modem:
 --   gateway [name]            (default name "gateway")
 local PROTO = "crabcraft"
-local CRAB_VERSION = "0.2.2" -- stamped by tools/amalgamate.py
+local CRAB_VERSION = "0.2.3" -- stamped by tools/amalgamate.py
 local GATEWAY_URL = "https://github.com/r33drichards/crabcraft/releases/latest/download/gateway.lua"
 local args = { ... }
 -- --install: relaunch on every boot (daemon computers reboot on chunk unload)
@@ -189,7 +189,7 @@ local function reconcile()
       for wid, w in pairs(workers) do
         if os.clock() - w.last < 20 then
           for slot, wl in pairs(w.slots) do
-            if wl == wname then
+            if wl == wname and (w.states or {})[slot] == "running" then
               placements[wname] = { worker = wid, slot = slot, state = "running" }
               dlog(("reconcile: adopted running '%s' on worker %d %s"):format(wname, wid, slot))
               break
@@ -247,9 +247,9 @@ local function handle(sender, msg)
     for _, s in ipairs(msg.slots or {}) do slots[s.disk] = s.workload or false end
     workers[sender] = { label = msg.worker, slots = slots, last = os.clock(), version = msg.version }
     dlog(("worker %d (%s) registered with %d slot(s)"):format(sender, tostring(msg.worker), #(msg.slots or {})))
-    -- adopt existing placements (worker reboot recovery)
+    -- adopt existing placements (worker reboot recovery; running slots only)
     for _, s in ipairs(msg.slots or {}) do
-      if s.workload and registry[s.workload] and not placements[s.workload] then
+      if s.workload and s.state == "running" and registry[s.workload] and not placements[s.workload] then
         placements[s.workload] = { worker = sender, slot = s.disk, state = "running" }
         dlog(("adopted '%s' on worker %d"):format(s.workload, sender))
       end
@@ -274,8 +274,10 @@ local function handle(sender, msg)
     if w then
       w.last = os.clock()
       if msg.version then w.version = msg.version end
+      w.states = w.states or {}
       for _, s in ipairs(msg.slots or {}) do
         w.slots[s.disk] = s.workload or false
+        w.states[s.disk] = s.state
         local p = s.workload and placements[s.workload]
         if p and p.worker == sender then p.state = s.state or "running" end
       end

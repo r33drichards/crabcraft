@@ -853,7 +853,7 @@ end
 --   worker [gatewayName]      (default: first crabcraft host found)
 -- Needs beside it: runtime.lua, cmval.lua, json.lua, and the wasmcraft bundle.
 local PROTO = "crabcraft"
-local CRAB_VERSION = "0.2.1" -- stamped by tools/amalgamate.py
+local CRAB_VERSION = "0.2.2" -- stamped by tools/amalgamate.py
 local WORKER_URL = "https://github.com/r33drichards/crabcraft/releases/latest/download/worker.lua"
 local args = { ... }
 if args[1] == "--install" and type(fs) == "table" then

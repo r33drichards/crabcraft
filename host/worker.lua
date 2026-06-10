@@ -223,7 +223,14 @@ local function assign(msg)
   writefile(s.dir .. "/crab-meta.json", json.encode(s.meta))
   s.w, s.module = nil, nil
   local ok, err = pcall(start_slot, msg.slot)
-  if not ok then return { ok = false, err = "start failed: " .. tostring(err) } end
+  if not ok then
+    -- clear the slot completely: a phantom meta would be advertised by
+    -- heartbeats and wrongly adopted by the gateway
+    s.meta, s.w, s.module, s.session = nil, nil, nil, nil
+    delfile(s.dir .. "/crab-meta.json")
+    delfile(s.dir .. "/workload.wasm")
+    return { ok = false, err = "start failed: " .. tostring(err) }
+  end
   return { ok = true }
 end
 
