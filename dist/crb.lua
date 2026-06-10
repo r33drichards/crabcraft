@@ -919,7 +919,7 @@ if not cmd then
   print("  crb deploy <file.yml>")
   print("  crb ls | schema <name> | remove <name>")
   print("  crb invoke <name> <func> [key=value ...]")
-  print("  crb sql <statement...>        (the sqlite workload)")
+  print("  crb sql <statement...>        (alias: invoke sqlite exec)")
   print("  (-g <gateway> anywhere to pick a gateway)")
   return
 end
@@ -1002,43 +1002,70 @@ elseif cmd == "schema" then
       f.result and (" -> " .. (type(f.result) == "string" and f.result or f.result.kind)) or ""))
   end
 
-elseif cmd == "invoke" then
-  local name = assert(args[2], "crb invoke <name> <func> [key=value ...]")
-  local func = assert(args[3], "crb invoke <name> <func> [key=value ...]")
-  local argv
-  if args[4] and args[4]:sub(1, 1) == "{" then
-    -- raw JSON still accepted (rejoin what the shell split)
-    argv = json.decode(table.concat(args, " ", 4))
+elseif cmd == "invoke" or cmd == "call" or cmd == "sql" then
+  -- GENERIC, schema-driven invocation. Argument forms, decided by the
+  -- function's own WIT signature:
+  --   exactly one string-typed param  -> the whole tail is that string
+  --   anything else                   -> key=value pairs (or raw JSON)
+  -- `crb sql <stmt...>` is a pure alias for `crb invoke sqlite exec <stmt...>`.
+  local name, func, from
+  if cmd == "sql" then
+    name, func, from = "sqlite", "exec", 2
   else
-    argv = kvargs(4)
+    name = assert(args[2], "crb invoke <name> <func> [args...]")
+    func = assert(args[3], "crb invoke <name> <func> [args...]")
+    from = 4
   end
   local C = client.connect(GW)
   local w = C:workload(name)
-  local ok, res = pcall(function() return w[func](argv) end)
+  local argv
+  local fdef = type(w) == "table" and w.__schema and (function()
+    local addr = w.__schema.functions[func] and func
+    if not addr then
+      for a in pairs(w.__schema.functions) do
+        if a:match("#(.+)$") == func then addr = a break end
+      end
+    end
+    return addr and w.__schema.functions[addr]
+  end)() or nil
+  if args[from] and args[from]:sub(1, 1) == "{" then
+    argv = json.decode(table.concat(args, " ", from)) -- raw JSON (rejoined)
+  elseif fdef and #fdef.params == 1 and fdef.params[1].type == "string"
+      and not (args[from] or ""):match("^[%w_%-]+=") then
+    argv = { table.concat(args, " ", from) }          -- single string param: join tail
+  elseif fdef and #fdef.params == 1 and type(fdef.params[1].type) == "table"
+      and fdef.params[1].type.kind == "record"
+      and #fdef.params[1].type.fields == 1 and fdef.params[1].type.fields[1].type == "string"
+      and not (args[from] or ""):match("^[%w_%-]+=") then
+    -- single record param with one string field: join tail into that field
+    argv = { [fdef.params[1].type.fields[1].name] = table.concat(args, " ", from) }
+  else
+    argv = kvargs(from)                               -- key=value pairs
+  end
+  local ok, res = pcall(function()
+    if fdef then return w[func](argv) end
+    return w(argv) -- command kind: the proxy itself is callable
+  end)
   if not ok then print("FAILED: " .. tostring(res)) return end
-  if type(res) == "table" then print(json.encode(res)) else print(tostring(res)) end
-
-elseif cmd == "sql" then
-  -- crb sql SELECT * FROM pets        (everything after 'sql' is the statement)
-  local stmt = table.concat(args, " ", 2)
-  assert(#stmt > 0, "crb sql <statement...>")
-  local C = client.connect(GW)
-  local db = C:workload("sqlite")
-  local ok, res = pcall(function() return db.exec({ sql = stmt }) end)
-  if not ok then print("FAILED: " .. tostring(res)) return end
-  if type(res) == "table" and res.is_err then print("SQL ERROR: " .. tostring(res.err))
-  elseif type(res) == "table" and res.ok then
-    local okj, rows = pcall(json.decode, res.ok)
-    if okj and rows.columns then
-      print(table.concat(rows.columns, " | "))
-      for _, row in ipairs(rows.rows or {}) do
+  -- result rendering: unwrap result<ok,err>; tabulate {columns,rows} JSON
+  if type(res) == "table" and res.is_err then
+    print("ERROR: " .. tostring(res.err))
+  elseif type(res) == "table" and res.is_ok then
+    local body = res.ok
+    local okj, parsed = pcall(json.decode, tostring(body))
+    if okj and type(parsed) == "table" and parsed.columns then
+      print(table.concat(parsed.columns, " | "))
+      for _, row in ipairs(parsed.rows or {}) do
         local cells = {}
         for i, cell in ipairs(row) do cells[i] = tostring(cell) end
         print(table.concat(cells, " | "))
       end
-      print(("(%s change(s))"):format(tostring(rows.changes)))
-    else print(tostring(res.ok)) end
-  else print(json.encode(res)) end
+      print(("(%s change(s))"):format(tostring(parsed.changes)))
+    else
+      print(tostring(body))
+    end
+  elseif type(res) == "table" then print(json.encode(res))
+  else print(tostring(res)) end
 
 elseif cmd == "remove" then
   local C = client.connect(GW)
