@@ -72,6 +72,25 @@ encoded params per section 1. Reply payload:
 
 Unknown function name => status 1 with message `unknown function: <name>`.
 
+### Optional import: the service mesh (`crabcraft.call`)
+
+A guest MAY import (module `"crabcraft"`, field `"call"`):
+
+```
+call(wl_ptr: i32, wl_len: i32,      ; target workload NAME (utf-8)
+     fn_ptr: i32, fn_len: i32,      ; function address <instance>#<function>
+     par_ptr: i32, par_len: i32)    ; encoded params (section 1)
+  -> i32                            ; ptr to LENBUF reply
+```
+
+The reply LENBUF payload uses the same `[status][body]` shape as crab_invoke
+replies (0 = ok + encoded result, 1 = error string). The host routes the call
+through the gateway to wherever the target workload runs - guests address
+SERVICES BY NAME and never know about placement (that is the mesh). The host
+writes the reply into guest memory via `crab_alloc`. Re-entrancy is not
+guaranteed in v0: a workload calling itself (directly or via a cycle) may
+deadlock; gateways apply timeouts.
+
 ## 3. Orchestration model (more k8s than Lambda)
 
 Three roles on one rednet protocol `"crabcraft"`:
@@ -133,7 +152,24 @@ wins; a workload missing for N heartbeats is rescheduled to another free slot
 (its DISK data does not migrate - state is volume-local, exactly like a pod
 losing its node-local volume).
 
-## 4. Schema-driven clients (the factory)
+## 4. Manifests (declarative deploys)
+
+`crb deploy <file.yml>` applies a manifest (YAML subset: scalars, nested maps,
+lists of scalars; no anchors/multi-doc):
+
+```yaml
+name: hello
+wasm: https://example.com/hello.wasm     # fetched by the assigned worker
+kind: reactor                             # or: command
+schema: https://example.com/hello.json    # resolved-WIT JSON (reactor kind);
+                                          # url or inline path on the client
+```
+
+The client reads the manifest, fetches `schema` itself if it is a URL/path,
+and sends a single `deploy` message carrying the schema inline (workers never
+need wasm-tools).
+
+## 5. Schema-driven clients (the factory)
 
 Clients fetch the module's resolved-WIT JSON (`wasm-tools component wit
 --json`) via the `schema` request, then encode/decode values generically from
