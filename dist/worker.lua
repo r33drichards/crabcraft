@@ -853,7 +853,7 @@ end
 --   worker [gatewayName]      (default: first crabcraft host found)
 -- Needs beside it: runtime.lua, cmval.lua, json.lua, and the wasmcraft bundle.
 local PROTO = "crabcraft"
-local CRAB_VERSION = "0.2.7" -- stamped by tools/amalgamate.py
+local CRAB_VERSION = "0.2.8" -- stamped by tools/amalgamate.py
 local WORKER_URL = "https://github.com/r33drichards/crabcraft/releases/latest/download/worker.lua"
 local args = { ... }
 if args[1] == "--install" and type(fs) == "table" then
@@ -995,7 +995,7 @@ local function slot_list()
   for sname, s in pairs(slots) do
     out[#out + 1] = { disk = sname, workload = s.meta and s.meta.name or nil,
       used = slot_used(s.dir),
-      state = s.meta and ((s.w or s.session or (s.meta.kind == "command" and s.module)) and "running" or "loading") or nil }
+      state = s.meta and ((s.w or s.sessions or (s.meta.kind == "command" and s.module)) and "running" or "loading") or nil }
   end
   return out
 end
@@ -1059,7 +1059,8 @@ local function start_slot(sname)
   if s.meta.kind == "session" then
     local t0 = os.clock()
     local plib = get_picatlib()
-    s.session = plib.session({ module = wasm, root = s.dir, mode = "transpile" })
+    s.wasmbytes = wasm
+    s.sessions = { main = plib.session({ module = wasm, root = s.dir, mode = "transpile" }) }
     print(("worker: '%s' (session) warm in %s (%.1fs)"):format(s.meta.name, sname, os.clock() - t0))
   elseif s.meta.kind == "command" then
     print(("worker: '%s' (command) ready in %s"):format(s.meta.name, sname))
@@ -1096,7 +1097,7 @@ local function assign(msg)
   if not ok then
     -- clear the slot completely: a phantom meta would be advertised by
     -- heartbeats and wrongly adopted by the gateway
-    s.meta, s.w, s.module, s.session = nil, nil, nil, nil
+    s.meta, s.w, s.module, s.sessions, s.wasmbytes = nil, nil, nil, nil, nil
     delfile(s.dir .. "/crab-meta.json")
     delfile(s.dir .. "/workload.wasm")
     return { ok = false, err = "start failed: " .. tostring(err) }
@@ -1107,8 +1108,11 @@ end
 local function drain(msg)
   local s = slots[msg.slot]
   if s then
-    if s.session then pcall(function() s.session:close() end) end
-    s.meta, s.w, s.module, s.session = nil, nil, nil, nil
+    if s.sessions then
+      for _, sess in pairs(s.sessions) do pcall(function() sess:close() end) end
+    end
+    s.meta, s.w, s.module, s.sessions, s.wasmbytes, s.sessq = nil, nil, nil, nil, nil, nil
+    os.queueEvent("crab_work") -- wake session tasks so they notice and exit
     delfile(s.dir .. "/crab-meta.json")
     delfile(s.dir .. "/workload.wasm")
     print("worker: drained " .. msg.slot)
@@ -1125,10 +1129,9 @@ local function do_invoke(msg)
   local s = find_workload(msg.name)
   if not s then return { ok = false, err = "workload not here: " .. tostring(msg.name) } end
   if s.meta.kind == "session" then
-    if not s.session then return { ok = false, err = "session still booting" } end
-    local ok, out = pcall(function() return s.session:run(msg.body or "", "req.pi") end)
-    if not ok then return { ok = false, err = "session error: " .. tostring(out) } end
-    return { ok = true, result = out }
+    -- handled by per-session tasks (route_session_invoke); only reached if
+    -- the slot is still booting its main session
+    return { ok = false, err = "session still booting" }
   end
   if s.meta.kind == "command" then
     local body = msg.body or ""
@@ -1152,6 +1155,69 @@ end
 -- ---- tasks ----------------------------------------------------------------------
 local tasks = {}
 local function spawn(fn) tasks[#tasks + 1] = { co = coroutine.create(fn) } end
+
+-- ---- shared execution for session workloads (picatd's model) -----------------
+-- Each named session gets its own queue + coroutine: a long solve in session
+-- 'a' never blocks session 'b' or the slot's control messages. Sessions boot
+-- lazily inside their own task (a multi-minute boot doesn't stall the slot).
+local function session_task(s, sname2)
+  return function()
+    while true do
+      local q = s.sessq and s.sessq[sname2]
+      if not q then return end -- drained
+      if #q.jobs == 0 then
+        os.pullEvent("crab_work")
+      else
+        local job = table.remove(q.jobs, 1)
+        local m = job.msg
+        local reply
+        if m.reset then
+          local old = s.sessions and s.sessions[sname2]
+          if old then pcall(function() old:close() end) end
+          if s.sessions then s.sessions[sname2] = nil end
+          s.sessq[sname2] = nil
+          reply = { ok = true, result = "session '" .. sname2 .. "' reset" }
+          rednet.send(job.sender, { type = "invoke-reply", id = m.id,
+            ok = reply.ok, result = reply.result, err = reply.err }, PROTO)
+          return -- task ends; a fresh invoke re-creates queue+task+session
+        end
+        if s.sessions and not s.sessions[sname2] then
+          print(("worker: booting session '%s' for '%s'"):format(sname2, s.meta and s.meta.name or "?"))
+          local plib = get_picatlib()
+          local okb, sess = pcall(plib.session,
+            { module = s.wasmbytes, root = s.dir, mode = "transpile" })
+          if okb then s.sessions[sname2] = sess
+          else reply = { ok = false, err = "session boot failed: " .. tostring(sess) } end
+        end
+        if not reply then
+          if not (s.sessions and s.sessions[sname2]) then
+            reply = { ok = false, err = "workload drained" }
+          else
+            local ok, out = pcall(function()
+              return s.sessions[sname2]:run(m.body or "", "req_" .. sname2 .. ".pi")
+            end)
+            reply = ok and { ok = true, result = out }
+                       or { ok = false, err = "session error: " .. tostring(out) }
+          end
+        end
+        rednet.send(job.sender, { type = "invoke-reply", id = m.id,
+          ok = reply.ok, result = reply.result, err = reply.err }, PROTO)
+      end
+    end
+  end
+end
+
+local function route_session_invoke(s, job)
+  local sname2 = job.msg.session or "main"
+  s.sessq = s.sessq or {}
+  if not s.sessq[sname2] then
+    s.sessq[sname2] = { jobs = {} }
+    spawn(session_task(s, sname2))
+  end
+  local q = s.sessq[sname2].jobs
+  q[#q + 1] = job
+  os.queueEvent("crab_work")
+end
 
 -- PER-SLOT queues + coroutines (the picatd lesson): a workload blocked on a
 -- mesh call must not starve other workloads on the same computer - otherwise
@@ -1217,10 +1283,14 @@ local function slot_task(sname, s)
           drain(m)
           rednet.send(gw, { type = "heartbeat", worker = label, slots = slot_list(), version = CRAB_VERSION }, PROTO)
         elseif m.type == "invoke" then
-          local ok, r = pcall(do_invoke, m)
-          if not ok then r = { ok = false, err = "worker error: " .. tostring(r) } end
-          rednet.send(job.sender, { type = "invoke-reply", id = m.id,
-            ok = r.ok, result = r.result, err = r.err }, PROTO)
+          if s.meta and s.meta.kind == "session" and s.sessions then
+            route_session_invoke(s, job)
+          else
+            local ok, r = pcall(do_invoke, m)
+            if not ok then r = { ok = false, err = "worker error: " .. tostring(r) } end
+            rednet.send(job.sender, { type = "invoke-reply", id = m.id,
+              ok = r.ok, result = r.result, err = r.err }, PROTO)
+          end
         end
       end
     end

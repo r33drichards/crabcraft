@@ -394,7 +394,8 @@ local function handle(sender, msg)
     end
     inflight[msg.id] = { from = sender, t = os.clock() }
     rednet.send(wid, { type = "invoke", id = msg.id, name = msg.name,
-      func = msg.func, params = msg.params, body = msg.body }, PROTO)
+      func = msg.func, params = msg.params, body = msg.body,
+      session = msg.session, reset = msg.reset }, PROTO)
   elseif msg.id and tostring(msg.id):match("^asg:") and msg.ok ~= nil then
     local wname = tostring(msg.id):sub(5)
     if msg.ok == true then

@@ -97,10 +97,19 @@ function M.connect(gwname, opts)
 
   function C:_proxy(name, sjson, kind)
     if kind == "command" or kind == "session" then
-      -- command/session kinds: one callable; strings pass through verbatim
-      return setmetatable({}, { __call = function(_, body)
+      -- command/session kinds: one callable; strings pass through verbatim.
+      -- session kind: optional second arg = named session ("main" default),
+      -- proxy.reset(sess) discards a session's state (picatd's .reset)
+      local p = {}
+      p.reset = function(sess)
         local r = self:request({ type = "invoke", name = name,
-          body = type(body) == "string" and body or json.encode(body) }, 120)
+          session = sess, reset = true }, 60)
+        if not r.ok then error("reset failed: " .. tostring(r.err), 0) end
+        return r.result
+      end
+      return setmetatable(p, { __call = function(_, body, sess)
+        local r = self:request({ type = "invoke", name = name, session = sess,
+          body = type(body) == "string" and body or json.encode(body) }, 300)
         if not r.ok then error("invoke failed: " .. tostring(r.err), 0) end
         local ok, decoded = pcall(json.decode, r.result)
         return ok and decoded or r.result
