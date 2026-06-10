@@ -7,6 +7,7 @@
 
 use crate::value::{Type, Value};
 
+#[cfg(target_arch = "wasm32")]
 #[link(wasm_import_module = "crabcraft")]
 extern "C" {
     /// `call(wl_ptr, wl_len, fn_ptr, fn_len, par_ptr, par_len) -> ptr` to a
@@ -28,6 +29,7 @@ extern "C" {
 ///
 /// Returns the encoded result value bytes on status 0, or the error string
 /// on status 1 (also used for transport-level failures).
+#[cfg(target_arch = "wasm32")]
 pub fn mesh_call(workload: &str, func: &str, params: &[u8]) -> Result<Vec<u8>, String> {
     let reply = unsafe {
         crabcraft_call(
@@ -64,4 +66,11 @@ pub fn mesh_call(workload: &str, func: &str, params: &[u8]) -> Result<Vec<u8>, S
         Some((s, _)) => Err(format!("mesh: invalid reply status byte: {s}")),
         None => Err("mesh: empty reply payload".into()),
     }
+}
+
+/// Non-wasm stub so host-side `cargo test` / `cargo check` of mesh-enabled
+/// crates still compiles; the real import only exists in wasm guests.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn mesh_call(_workload: &str, _func: &str, _params: &[u8]) -> Result<Vec<u8>, String> {
+    Err("mesh: crabcraft.call is only available inside a wasm guest".into())
 }

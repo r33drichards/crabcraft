@@ -27,8 +27,8 @@ function M.connect(gwname, opts)
   assert(open_modems(), "client: no modem attached")
   local gw
   for _ = 1, opts.attempts or 4 do
-    if gwname then gw = rednet.lookup(PROTO, gwname)
-    else local hosts = { rednet.lookup(PROTO) }; gw = hosts[1] end
+    if gwname then gw = rednet.lookup(PROTO, gwname, 5)
+    else local hosts = { rednet.lookup(PROTO, nil, 5) }; gw = hosts[1] end
     if gw then break end
   end
   assert(gw, "client: no crabcraft gateway on the network")

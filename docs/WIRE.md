@@ -1,10 +1,19 @@
 # crabcraft wire format (v0)
 
-crabcraft is "Lambda with wasm" for ComputerCraft: WIT-defined interfaces,
-wRPC-style invocation over **rednet**, wasi-p1 guest modules running on
-[wasmcraft](https://github.com/r33drichards/wasmcraft). This document is the
-single normative reference for the three layers; the Rust guest SDK and the
-Lua host MUST both conform to it.
+crabcraft is wasm orchestration for ComputerCraft (more k8s than Lambda):
+WIT-defined interfaces, wRPC-style invocation over **rednet**, wasi-p1 guest
+modules executed by [wasmcraft](https://github.com/r33drichards/wasmcraft).
+This document is the single normative reference; every implementation (guest
+SDKs in any language, the Lua hosts) MUST conform to it.
+
+**The contract is this ABI, not a language.** A workload is ANY `.wasm` file
+(wasm32-wasip1) that either exports the section-2 functions (`reactor` kind:
+warm instances, typed WIT interfaces) or is a plain wasi command module
+(`command` kind: `_start`, JSON on stdin/stdout). Rust, TinyGo, Javy-compiled
+JS, and RustPython-compiled Python are worked examples, not a whitelist -
+anything that compiles to wasi-p1 and speaks the ABI deploys identically. An
+interpreter compiled to wasm is itself a valid workload, which is how
+script-style invocation is supported: deploy the interpreter, send it code.
 
 It implements a **subset** of the wRPC SPEC (https://github.com/bytecodealliance/wrpc/blob/main/SPEC.md):
 synchronous parameters/results in the root frame only. Streams, futures,

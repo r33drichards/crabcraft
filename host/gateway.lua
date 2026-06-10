@@ -4,6 +4,14 @@
 --   gateway [name]            (default name "gateway")
 local PROTO = "crabcraft"
 local args = { ... }
+-- --install: relaunch on every boot (daemon computers reboot on chunk unload)
+if args[1] == "--install" and type(fs) == "table" then
+  local h = fs.open("startup.lua", "w")
+  h.write('shell.run("gateway"' .. (args[2] and (', "' .. args[2] .. '"') or "") .. ')\n')
+  h.close()
+  print("gateway: installed to startup.lua")
+  table.remove(args, 1)
+end
 local name = args[1] or (os.getComputerLabel and os.getComputerLabel()) or "gateway"
 
 local opened = false
@@ -96,6 +104,20 @@ local function handle(sender, msg)
     respond(sender, { ok = true }, msg.id)
   elseif t == "heartbeat" then
     local w = workers[sender]
+    if not w then
+      -- gateway rebooted and lost its memory: adopt the worker from its
+      -- heartbeat (picatd lesson: never depend on in-memory state surviving)
+      local slots = {}
+      for _, sl in ipairs(msg.slots or {}) do slots[sl.disk] = sl.workload or false end
+      workers[sender] = { label = msg.worker, slots = slots, last = os.clock() }
+      w = workers[sender]
+      dlog(("adopted worker %d (%s) from heartbeat"):format(sender, tostring(msg.worker)))
+      for _, sl in ipairs(msg.slots or {}) do
+        if sl.workload and registry[sl.workload] and not placements[sl.workload] then
+          placements[sl.workload] = { worker = sender, slot = sl.disk, state = sl.state or "running" }
+        end
+      end
+    end
     if w then
       w.last = os.clock()
       for _, s in ipairs(msg.slots or {}) do

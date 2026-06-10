@@ -4,7 +4,17 @@
 -- Needs beside it: runtime.lua, cmval.lua, json.lua, and the wasmcraft bundle.
 local PROTO = "crabcraft"
 local args = { ... }
+if args[1] == "--install" and type(fs) == "table" then
+  table.remove(args, 1)
+  local rest = ""
+  for _, a in ipairs(args) do rest = rest .. ', "' .. a .. '"' end
+  local h = fs.open("startup.lua", "w")
+  h.write('shell.run("worker"' .. rest .. ')\n')
+  h.close()
+  print("worker: installed to startup.lua")
+end
 local gwname = args[1]
+if gwname == "--slots" then gwname = nil end
 
 package.path = "host/?.lua;./?.lua;" .. package.path
 local rt = require("runtime")
@@ -21,14 +31,32 @@ end
 if not opened then print("worker: no modem attached."); return end
 
 -- ---- find the gateway ---------------------------------------------------------
+-- picatd lesson: busy computers answer dns lookups too slowly for the window;
+-- cache the id after first contact and ping it directly on later boots.
 local gw
-for attempt = 1, 6 do
-  if gwname then gw = rednet.lookup(PROTO, gwname)
-  else local hosts = { rednet.lookup(PROTO) }; gw = hosts[1] end
-  if gw then break end
-  print("worker: no gateway answered lookup " .. attempt .. "/6")
+do
+  local f = io.open(".crab_gateway", "r")
+  local cached = f and tonumber(f:read("*a")); if f then f:close() end
+  if cached then
+    rednet.send(cached, { type = "ping", id = "wkr:ping" }, PROTO)
+    local t = os.clock()
+    while os.clock() - t < 10 do
+      local s, r = rednet.receive(PROTO, 10 - (os.clock() - t))
+      if s == cached and type(r) == "table" and r.id == "wkr:ping" then gw = cached; break end
+    end
+    if not gw then print("worker: cached gateway #" .. cached .. " silent - rediscovering") end
+  end
+end
+if not gw then
+  for attempt = 1, 6 do
+    if gwname then gw = rednet.lookup(PROTO, gwname, 5)
+    else local hosts = { rednet.lookup(PROTO, nil, 5) }; gw = hosts[1] end
+    if gw then break end
+    print("worker: no gateway answered lookup " .. attempt .. "/6")
+  end
 end
 if not gw then print("worker: no gateway on the network."); return end
+do local f = io.open(".crab_gateway", "w"); if f then f:write(tostring(gw)); f:close() end end
 print("worker: gateway is #" .. gw)
 
 -- ---- slots: one workload per disk ----------------------------------------------
