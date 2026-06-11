@@ -77,6 +77,10 @@ survives reboots, travels with the disk.
 
 ## Tests
 
+- `test/check.sh` — the dev gate: rustfmt (`-p crabgen` only; guest `gen/`
+  code is generated and not rustfmt-stable), clippy `-D warnings`,
+  `cargo test --workspace`, and `crabgen check` (generated-code freshness).
+  Run it before committing; it fetches its own toolchain via nix-shell.
 - `host/cmval_selftest.lua`, `host/cmval_vectors.lua` — codec round-trips +
   golden-vector parity with the Rust SDK (run on lua5.4 and Cobalt)
 - `host/hello_smoke.lua`, `host/sqlite_smoke.lua` — guests on the engine (Cobalt)

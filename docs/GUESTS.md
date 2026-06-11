@@ -260,3 +260,4 @@ non-nix pin is asc, locked by the committed package-lock.json.
 | CLI usage | `cargo run -p crabgen -- --help` |
 | The design and rationale | [plans/2026-06-10-crabgen-design.md](plans/2026-06-10-crabgen-design.md) |
 | The canonical end-to-end walkthrough (as code) | `test/e2e_crabgen.py` |
+| The pre-commit gate (fmt/clippy/tests/freshness) | `test/check.sh` |

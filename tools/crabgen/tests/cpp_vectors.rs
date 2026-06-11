@@ -261,7 +261,10 @@ fn gen_encode(ty: &Value, val: &Value, code: &mut String) {
             for i in val.as_array().expect("flags value") {
                 bits[i.as_u64().expect("flag index") as usize] = true;
             }
-            let lits: Vec<&str> = bits.iter().map(|b| if *b { "true" } else { "false" }).collect();
+            let lits: Vec<&str> = bits
+                .iter()
+                .map(|b| if *b { "true" } else { "false" })
+                .collect();
             code.push_str(&format!(
                 "{p}crab::EncodeFlags(out, std::vector<bool>{{{}}});\n",
                 lits.join(", ")
@@ -457,8 +460,19 @@ fn gen_reenc(ty: &Value, expect: Option<&Value>, n: &mut u32, code: &mut String)
 fn is_scalar_kind(k: &str) -> bool {
     matches!(
         k,
-        "bool" | "u8" | "u16" | "u32" | "u64" | "s8" | "s16" | "s32" | "s64" | "f32" | "f64"
-            | "char" | "string"
+        "bool"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "s8"
+            | "s16"
+            | "s32"
+            | "s64"
+            | "f32"
+            | "f64"
+            | "char"
+            | "string"
     )
 }
 
@@ -609,9 +623,7 @@ static bool registered [[maybe_unused]] =
     // (name bytes in the export/import sections).
     for needle in ["crab_alloc", "crab_schema", "crab_invoke", "crabcraft"] {
         assert!(
-            bytes
-                .windows(needle.len())
-                .any(|w| w == needle.as_bytes()),
+            bytes.windows(needle.len()).any(|w| w == needle.as_bytes()),
             "smoke.wasm missing {needle:?} (export/import section)"
         );
     }
