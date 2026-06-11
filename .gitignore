@@ -3,3 +3,4 @@ target/
 __pycache__/
 guest/sqlite-c/sqlite3.c
 .worktrees/
+node_modules/

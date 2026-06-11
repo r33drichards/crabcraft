@@ -25,8 +25,8 @@ Workloads can call each other by name through the mesh (`crabcraft.call`).
 | Go | `guest/hello-go` (TinyGo) | `hello-go.wasm` 97 KB | reactor (typed WIT) |
 | C + SQLite | `guest/sqlite-c` | `sqlite.wasm` 740 KB | reactor; db persists on the volume |
 | Rust mesh | `guest/caller` | `caller.wasm` 90 KB | reactor; calls other workloads |
-| C++ | crabgen `--lang cpp` (zig c++) | scaffolded per project | reactor (typed WIT) |
-| TypeScript | crabgen `--lang ts` (AssemblyScript) | scaffolded per project | reactor (typed WIT) |
+| C++ | `guest/hello-cpp` (zig c++) | `hello-cpp.wasm` 43 KB | reactor (typed WIT) |
+| TypeScript | `guest/hello-ts` (AssemblyScript) | `hello-ts.wasm` 19 KB | reactor (typed WIT) |
 
 **Write your own guest:** [docs/GUESTS.md](docs/GUESTS.md) — `crabgen`
 scaffolds a complete guest from a WIT file in Rust, Go, C++, or TypeScript
@@ -84,7 +84,7 @@ survives reboots, travels with the disk.
 - `host/hello_smoke.lua`, `host/sqlite_smoke.lua` — guests on the engine (Cobalt)
 - `test/e2e_sim.py` — full cluster in the CraftOS-PC simulator: gateway + 2
   workers + client; deploy/reconcile/reschedule, typed invokes, cross-module
-  mesh, all language lanes, sqlite volume persistence. **9/9.**
+  mesh, all language lanes, sqlite volume persistence. **10/10.**
 - `python3 test/e2e_crabgen.py go rust cpp ts` — the full crabgen developer
   workflow per lane (scaffold, build, deploy, invoke; then WIT evolution with
   check/regen) in the same simulator. **40/40** (~26 min).

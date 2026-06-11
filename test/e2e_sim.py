@@ -36,6 +36,10 @@ SQLITE_WASM = slurp("modules/sqlite.wasm", binary=True) if os.path.exists("modul
 SQLITE_SCHEMA = slurp("wit/sqlite.json") if os.path.exists("wit/sqlite.json") else None
 GO_WASM = slurp("modules/hello-go.wasm", binary=True) if os.path.exists("modules/hello-go.wasm") else None
 GO_SCHEMA = slurp("guest/hello-go/gen/schema.json") if os.path.exists("guest/hello-go/gen/schema.json") else None
+CPP_WASM = slurp("modules/hello-cpp.wasm", binary=True) if os.path.exists("modules/hello-cpp.wasm") else None
+CPP_SCHEMA = slurp("guest/hello-cpp/gen/schema.json") if os.path.exists("guest/hello-cpp/gen/schema.json") else None
+TS_WASM = slurp("modules/hello-ts.wasm", binary=True) if os.path.exists("modules/hello-ts.wasm") else None
+TS_SCHEMA = slurp("guest/hello-ts/gen/schema.json") if os.path.exists("guest/hello-ts/gen/schema.json") else None
 
 B64 = '''
 local function b64dec(data)
@@ -106,7 +110,7 @@ local ok, err = pcall(fn)
 emit('gateway EXITED: ' .. tostring(ok) .. ' ' .. tostring(err))
 """
 
-def worker_prog(label, bins, slots=3):
+def worker_prog(label, bins, slots=4):
     """Worker node program preloaded with `bins` ({filename: wasm bytes})."""
     worker_amalg = amalgamate(HOST_LIBS["worker"],
         {n: HOST_LIBS[n] for n in ["json", "cmval", "schema", "runtime"]})
@@ -134,6 +138,10 @@ def default_worker_bins(label):
         bins["hello-go.wasm"] = GO_WASM
     if SQLITE_WASM and label == "w1":
         bins["sqlite.wasm"] = SQLITE_WASM
+    if CPP_WASM and label == "w2":
+        bins["hello-cpp.wasm"] = CPP_WASM
+    if TS_WASM and label == "w1":
+        bins["hello-ts.wasm"] = TS_WASM
     return bins
 
 caller_test = ""
@@ -182,6 +190,32 @@ local hgo = C:workload('hello-go')
 emit('go greet: ' .. tostring(hgo.greet({{ name = 'gopher', excited = true }})))
 """
 
+cpp_test = ""
+if CPP_WASM:
+    cpp_test = f"""
+-- ANY-LANGUAGE, SAME ABI: the C++ (zig c++) reactor (file only on w2)
+r = C:deploy({{ name = 'hello-cpp', wasm = 'file:hello-cpp.wasm', kind = 'reactor',
+  schema = {lua_str(CPP_SCHEMA)} }})
+emit('deploy hello-cpp: ' .. tostring(r.ok))
+wait_running('hello-cpp')
+local hcpp = C:workload('hello-cpp')
+emit('cpp greet: ' .. tostring(hcpp.greet({{ name = 'ferris', excited = true }})))
+emit('cpp add: ' .. tostring(hcpp.add({{ a = 20, b = 3 }})))
+"""
+
+ts_test = ""
+if TS_WASM:
+    ts_test = f"""
+-- ANY-LANGUAGE, SAME ABI: the AssemblyScript reactor (file only on w1)
+r = C:deploy({{ name = 'hello-ts', wasm = 'file:hello-ts.wasm', kind = 'reactor',
+  schema = {lua_str(TS_SCHEMA)} }})
+emit('deploy hello-ts: ' .. tostring(r.ok))
+wait_running('hello-ts')
+local hts = C:workload('hello-ts')
+emit('ts greet: ' .. tostring(hts.greet({{ name = 'asc', excited = true }})))
+emit('ts add: ' .. tostring(hts.add({{ a = 50, b = 8 }})))
+"""
+
 client_test_body = f"""
 local __ok, __err = pcall(function()
 local client = require('client')
@@ -215,6 +249,8 @@ emit('add: ' .. tostring(hello.add({{ a = 40, b = 2 }})))
 {caller_test}
 {sqlite_test}
 {go_test}
+{cpp_test}
+{ts_test}
 -- cluster state for the record
 local l = C:list()
 for _, w in ipairs(l.workloads or {{}}) do
@@ -314,6 +350,12 @@ def main():
         checks.append(("cross-module mesh call", "mesh: via mesh: Hello, mesh!" in client_out))
     if GO_WASM:
         checks.append(("Go reactor lane", "go greet: Hello from Go, gopher!!!" in client_out))
+    if CPP_WASM:
+        checks.append(("C++ reactor lane", "cpp greet: Hello from C++, ferris!!!" in client_out
+                       and "cpp add: 23" in client_out))
+    if TS_WASM:
+        checks.append(("TS reactor lane", "ts greet: Hello from TS, asc!!!" in client_out
+                       and "ts add: 58" in client_out))
     if SQLITE_WASM:
         checks.append(("SQLite C lane + volume", '"rows":[["ferris"],["gopher"]]' in client_out
                        and "sqlite bad sql errs: true" in client_out))

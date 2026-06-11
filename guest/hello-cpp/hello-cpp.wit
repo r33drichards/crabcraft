@@ -1,0 +1,22 @@
+// hello-cpp — crabcraft guest interface. This file is the source of truth:
+// edit it, then run `crabgen regen guest/hello-cpp` to refresh gen/.
+//
+// Versioned package: backwards-compatible evolution = add functions freely;
+// new inputs as option<T>; breaking changes bump the version and the daemon
+// serves both side by side.
+package crab:hello-cpp@0.1.0;
+
+interface greeter {
+  record greet-request {
+    name: string,
+    /// optional flourish; older clients simply omit it (option = back-compat)
+    excited: option<bool>,
+  }
+
+  greet: func(req: greet-request) -> string;
+  add: func(a: u32, b: u32) -> u32;
+}
+
+world hello-cpp {
+  export greeter;
+}
