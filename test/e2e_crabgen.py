@@ -199,6 +199,49 @@ func (App) Shout(msg string) (string, error) {
         f.write(src)
 
 
+# ---- rust lane ---------------------------------------------------------------------
+
+def rust_trait(name):
+    """world <name> -> the generated trait: E2eRustImpl for e2e-rust."""
+    return "".join(seg.capitalize() for seg in name.split("-")) + "Impl"
+
+
+def rust_write_impl(proj, name):
+    """The scaffold-case impl: greet only (mirrors guest/hello's app.rs)."""
+    trait = rust_trait(name)
+    with open(os.path.join(proj, "src", "app.rs"), "w") as f:
+        f.write(f"""//! e2e impl for the {name} guest.
+
+use crate::gen::{{self, {trait}}};
+
+pub struct App;
+
+impl {trait} for App {{
+    fn greet(&self, req: gen::GreetRequest) -> Result<String, String> {{
+        let bang = if req.excited == Some(true) {{ "!!!" }} else {{ "!" }};
+        Ok(format!("Hello, {{}}{{bang}}", req.name))
+    }}
+}}
+""")
+
+
+def rust_add_shout(proj, name):
+    """What a maintainer does after regen prints the missing shout signature:
+    paste the method inside the impl block (before its closing brace)."""
+    path = os.path.join(proj, "src", "app.rs")
+    with open(path) as f:
+        src = f.read()
+    method = '''
+    fn shout(&self, msg: String) -> Result<String, String> {
+        Ok(msg.to_uppercase() + "!")
+    }
+'''
+    i = src.rfind("}")
+    src = src[:i] + method + src[i:]
+    with open(path, "w") as f:
+        f.write(src)
+
+
 # The per-lane seam. Behavioral contract every lane must honor:
 #   write_impl(proj, name) — greet returns "Hello, <name>" + ("!!!" if excited else "!")
 #   add_shout(proj, name)  — shout returns uppercase(msg) + "!"
@@ -211,6 +254,13 @@ LANE = {
         "write_impl": go_write_impl,
         "add_shout": go_add_shout,
         "shout_sig": "func (App) Shout(",
+    },
+    "rust": {
+        # `new --lang rust` also edits the root Cargo.toml members — already
+        # snapshot/restored lane-agnostically in run_lane, so no cleanup hook.
+        "write_impl": rust_write_impl,
+        "add_shout": rust_add_shout,
+        "shout_sig": "fn shout(&self, msg: String) -> Result<String, String>",
     },
 }
 
