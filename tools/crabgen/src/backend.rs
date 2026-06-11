@@ -12,6 +12,9 @@ use anyhow::{bail, Result};
 
 use crate::ir::Module;
 
+/// Invariant: every `dir` passed in is `<repo_root>/guest/<name>` — backends
+/// may rely on `dir.parent().parent()` being the workspace root (the Rust
+/// lane needs it to edit the root Cargo.toml members list).
 pub trait Backend {
     fn lang(&self) -> &'static str;
     /// Extension of the hand-written impl file (`impl.<ext>`).
@@ -50,6 +53,10 @@ impl Backend for TestBackend {
     }
 
     fn generate(&self, m: &Module, dir: &Path) -> Result<()> {
+        // Failure injection for the driver's regression tests.
+        if std::env::var_os("CRABGEN_FAIL_GENERATE").is_some_and(|v| v == "1") {
+            bail!("CRABGEN_FAIL_GENERATE=1: injected generate failure");
+        }
         let mut marker = format!("world {}\n", m.world);
         for f in m.exports.iter().flat_map(|i| &i.funcs) {
             marker.push_str(&f.wit_name);

@@ -55,6 +55,16 @@ fn crabgen(root: &Path, args: &[&str]) -> Output {
         .expect("spawn crabgen")
 }
 
+/// Like `crabgen`, with extra env vars set on the spawned binary.
+fn crabgen_env(root: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_crabgen"))
+        .args(args)
+        .envs(env.iter().copied())
+        .current_dir(root)
+        .output()
+        .expect("spawn crabgen")
+}
+
 /// stdout + stderr combined: tests assert on what the user sees, not channels.
 fn all_output(out: &Output) -> String {
     format!(
@@ -287,6 +297,32 @@ fn regen_reports_missing_impls_without_touching_impl_file() {
         fs::read_to_string(dir.join("impl.test")).unwrap(),
         "greet does things here\n",
         "regen never edits the impl file"
+    );
+}
+
+#[test]
+fn failed_generate_must_not_leave_a_fresh_manifest() {
+    let tmp = make_repo();
+    let dir = add_project(tmp.path(), "x", "test", VALID_WIT);
+    // stale: WIT mutated after MANIFEST was written
+    fs::write(dir.join("x.wit"), format!("{VALID_WIT}\n// v2\n")).unwrap();
+
+    let out = crabgen_env(
+        tmp.path(),
+        &["regen", "guest/x"],
+        &[("CRABGEN_FAIL_GENERATE", "1")],
+    );
+    assert!(
+        !out.status.success(),
+        "regen must fail: {}",
+        all_output(&out)
+    );
+
+    // The freshness stamp must only exist over gen/ that generate completed.
+    // A fresh MANIFEST here would make `check` pass on garbage forever.
+    assert!(
+        !dir.join("gen/MANIFEST").exists(),
+        "gen/MANIFEST must not exist after a failed generate"
     );
 }
 

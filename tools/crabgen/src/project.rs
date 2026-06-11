@@ -152,7 +152,7 @@ pub fn regen(project: &Project) -> Result<Outcome> {
     let backend = backend_for(&project.manifest.lang)?;
     let module = wit::load(&project.wit_path)?;
     rewrite_gen(&module, backend.as_ref(), &project.dir, &project.wit_path)?;
-    finish(&module, backend.as_ref(), &project.dir)
+    build_outcome(&module, backend.as_ref(), &project.dir)
 }
 
 /// Scaffold guest/<name>/ from a starter WIT, then run the same generate
@@ -172,7 +172,7 @@ pub fn new_project(repo_root: &Path, name: &str, lang: &str) -> Result<Outcome> 
         let module = wit::load(&wit_path)?;
         rewrite_gen(&module, backend.as_ref(), &dir, &wit_path)?;
         backend.scaffold(&module, &dir)?;
-        finish(&module, backend.as_ref(), &dir)
+        build_outcome(&module, backend.as_ref(), &dir)
     })();
     if result.is_err() {
         // best-effort cleanup of the dir we just created
@@ -181,8 +181,11 @@ pub fn new_project(repo_root: &Path, name: &str, lang: &str) -> Result<Outcome> 
     result
 }
 
-/// Delete gen/ and recreate it: schema.json + MANIFEST (driver-owned),
-/// then whatever the backend emits.
+/// Delete gen/ and recreate it: schema.json, the backend's output, and ONLY
+/// THEN the MANIFEST. The freshness stamp is written last so a generate
+/// failure can never leave a fresh MANIFEST over broken gen/ (which would
+/// make `check` pass on garbage forever). Accepted failure mode: gen/ without
+/// MANIFEST, which drops the project out of `discover` until regen succeeds.
 fn rewrite_gen(module: &Module, backend: &dyn Backend, dir: &Path, wit_path: &Path) -> Result<()> {
     let wit_bytes =
         fs::read(wit_path).with_context(|| format!("reading {}", wit_path.display()))?;
@@ -192,14 +195,15 @@ fn rewrite_gen(module: &Module, backend: &dyn Backend, dir: &Path, wit_path: &Pa
     }
     fs::create_dir_all(&gen)?;
     fs::write(gen.join("schema.json"), &module.schema_json)?;
+    backend.generate(module, dir)?;
     fs::write(
         gen.join("MANIFEST"),
         Manifest::new(backend.lang(), &wit_bytes).render(),
     )?;
-    backend.generate(module, dir)
+    Ok(())
 }
 
-fn finish(module: &Module, backend: &dyn Backend, dir: &Path) -> Result<Outcome> {
+fn build_outcome(module: &Module, backend: &dyn Backend, dir: &Path) -> Result<Outcome> {
     Ok(Outcome {
         impl_file: format!("impl.{}", backend.impl_ext()),
         missing_impls: backend.missing_impls(module, dir)?,
