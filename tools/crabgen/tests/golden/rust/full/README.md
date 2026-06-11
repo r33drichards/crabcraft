@@ -19,7 +19,7 @@ with plain cargo: `cargo check -p full`.
 
 ## Deploy
 
-Add a manifest and apply it in-game with `crb apply` (exported interface:
+Add a manifest and deploy it in-game with `crb deploy` (exported interface:
 `crab:full/kitchen@0.1.0`):
 
 ```yaml

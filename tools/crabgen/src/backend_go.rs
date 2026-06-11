@@ -1720,7 +1720,7 @@ wasmcraft engine refuses them. Host-side unit tests run with plain go:
 
 ## Deploy
 
-Add a manifest and apply it in-game with `crb apply` (exported interface:
+Add a manifest and deploy it in-game with `crb deploy` (exported interface:
 `{instance}`):
 
 ```yaml
