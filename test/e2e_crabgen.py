@@ -280,6 +280,34 @@ crab::Res<std::string> shout(std::string msg) {
 """)
 
 
+# ---- ts (AssemblyScript) lane --------------------------------------------------
+
+def ts_write_impl(proj, name):
+    """The scaffold-case impl: greet only. option<bool> maps to the generated
+    OptionBool box (null = none); impl functions return their monomorphic Res
+    class (ResString here, built with ok()/fail())."""
+    with open(os.path.join(proj, "assembly", "impl.ts"), "w") as f:
+        f.write(f"""// e2e impl for the {name} guest.
+import {{ GreetRequest, ResString }} from "./gen/bindings";
+
+export function greet(req: GreetRequest): ResString {{
+  const bang = req.excited !== null && req.excited!.value ? "!!!" : "!";
+  return ResString.ok("Hello, " + req.name + bang);
+}}
+""")
+
+
+def ts_add_shout(proj, name):
+    """What a maintainer does after regen prints the missing shout signature:
+    append the exported function (bindings.ts imports it by name)."""
+    with open(os.path.join(proj, "assembly", "impl.ts"), "a") as f:
+        f.write("""
+export function shout(msg: string): ResString {
+  return ResString.ok(msg.toUpperCase() + "!");
+}
+""")
+
+
 # The per-lane seam. Behavioral contract every lane must honor:
 #   write_impl(proj, name) — greet returns "Hello, <name>" + ("!!!" if excited else "!")
 #   add_shout(proj, name)  — shout returns uppercase(msg) + "!"
@@ -306,6 +334,13 @@ LANE = {
         "write_impl": cpp_write_impl,
         "add_shout": cpp_add_shout,
         "shout_sig": "crab::Res<std::string> shout(std::string msg)",
+    },
+    "ts": {
+        # assembly/impl.ts, package.json/lock, build.sh and node_modules all
+        # live inside guest/<name>; nothing leaks outside it.
+        "write_impl": ts_write_impl,
+        "add_shout": ts_add_shout,
+        "shout_sig": "export function shout(msg: string): ResString",
     },
 }
 
