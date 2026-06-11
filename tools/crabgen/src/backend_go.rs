@@ -1746,9 +1746,12 @@ nix shell nixpkgs#tinygo --command tinygo build -o ../../modules/{name}.wasm \
 
 # SIMD tripwire: the wasmcraft engine refuses 0xfd-prefixed (SIMD) opcodes.
 # wasm-objdump prints opcode bytes as "fd 0c" (no 0x prefix) and SIMD
-# mnemonics as v128.*/i8x16.*/...; match both (same pattern as hello-js).
+# mnemonics as v128.*/i8x16.*/... after the "|" column; anchor the mnemonic
+# check to that column so a symbol name containing e.g. "i32x4" can't
+# false-positive. The byte check can in rare cases match a wrapped non-SIMD
+# instruction's continuation byte (loud + debuggable, accepted).
 disasm="$(nix shell nixpkgs#wabt --command wasm-objdump -d ../../modules/{name}.wasm)"
-if grep -qE 'v128|i8x16|i16x8|i32x4|i64x2|f32x4|f64x2' <<<"$disasm" ||
+if grep -qE '\| +(v128|i8x16|i16x8|i32x4|i64x2|f32x4|f64x2|f16x8)\.' <<<"$disasm" ||
    grep -qE '^ *[0-9a-f]+: fd' <<<"$disasm"; then
   echo 'FATAL: SIMD opcodes in output wasm' >&2
   exit 1
