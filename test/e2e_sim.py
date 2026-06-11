@@ -36,7 +36,6 @@ SQLITE_WASM = slurp("modules/sqlite.wasm", binary=True) if os.path.exists("modul
 SQLITE_SCHEMA = slurp("wit/sqlite.json") if os.path.exists("wit/sqlite.json") else None
 GO_WASM = slurp("modules/hello-go.wasm", binary=True) if os.path.exists("modules/hello-go.wasm") else None
 GO_SCHEMA = slurp("guest/hello-go/gen/schema.json") if os.path.exists("guest/hello-go/gen/schema.json") else None
-JS_WASM = slurp("modules/hello-js.wasm", binary=True) if os.path.exists("modules/hello-js.wasm") else None
 
 B64 = '''
 local function b64dec(data)
@@ -135,8 +134,6 @@ def default_worker_bins(label):
         bins["hello-go.wasm"] = GO_WASM
     if SQLITE_WASM and label == "w1":
         bins["sqlite.wasm"] = SQLITE_WASM
-    if JS_WASM and label == "w2":
-        bins["hello-js.wasm"] = JS_WASM
     return bins
 
 caller_test = ""
@@ -185,18 +182,6 @@ local hgo = C:workload('hello-go')
 emit('go greet: ' .. tostring(hgo.greet({{ name = 'gopher', excited = true }})))
 """
 
-js_test = ""
-if JS_WASM:
-    js_test = f"""
--- COMMAND KIND: Javy-compiled JS, JSON in -> JSON out (file only on w2)
-r = C:deploy({{ name = 'hello-js', wasm = 'file:hello-js.wasm', kind = 'command' }})
-emit('deploy hello-js: ' .. tostring(r.ok))
-wait_running('hello-js')
-local hjs = C:workload('hello-js')
-local jr = hjs({{ fn = 'greet', name = 'quickjs' }})
-emit('js greet: ' .. tostring(type(jr) == 'table' and jr.result or jr))
-"""
-
 client_test_body = f"""
 local __ok, __err = pcall(function()
 local client = require('client')
@@ -230,7 +215,6 @@ emit('add: ' .. tostring(hello.add({{ a = 40, b = 2 }})))
 {caller_test}
 {sqlite_test}
 {go_test}
-{js_test}
 -- cluster state for the record
 local l = C:list()
 for _, w in ipairs(l.workloads or {{}}) do
@@ -333,9 +317,6 @@ def main():
     if SQLITE_WASM:
         checks.append(("SQLite C lane + volume", '"rows":[["ferris"],["gopher"]]' in client_out
                        and "sqlite bad sql errs: true" in client_out))
-    if JS_WASM:
-        checks.append(("JS command lane", "js greet: Hello from JS, quickjs!" in client_out))
-
     failed = [name for name, ok in checks if not ok]
     for name, ok in checks:
         print(("PASS " if ok else "FAIL ") + name)

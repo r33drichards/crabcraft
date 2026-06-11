@@ -9,8 +9,8 @@ SDKs in any language, the Lua hosts) MUST conform to it.
 **The contract is this ABI, not a language.** A workload is ANY `.wasm` file
 (wasm32-wasip1) that either exports the section-2 functions (`reactor` kind:
 warm instances, typed WIT interfaces) or is a plain wasi command module
-(`command` kind: `_start`, JSON on stdin/stdout). Rust, TinyGo, Javy-compiled
-JS, and RustPython-compiled Python are worked examples, not a whitelist -
+(`command` kind: `_start`, JSON on stdin/stdout). Rust, TinyGo, zig-built
+C/C++, and AssemblyScript are worked examples, not a whitelist -
 anything that compiles to wasi-p1 and speaks the ABI deploys identically. An
 interpreter compiled to wasm is itself a valid workload, which is how
 script-style invocation is supported: deploy the interpreter, send it code.
@@ -120,7 +120,7 @@ Three roles on one rednet protocol `"crabcraft"`:
 - `kind = "reactor"` (Rust, TinyGo, ...): the section-2 crab ABI. Instantiated
   once and kept WARM; each invoke is a `crab_invoke` call. Params/results =
   section-1 encoded values; interface defined in WIT.
-- `kind = "command"` (Javy/QuickJS JS, Python, any wasi CLI): a wasi command
+- `kind = "command"` (any wasi CLI): a wasi command
   module. Each invoke runs `_start` with the request JSON on stdin; stdout is
   the reply JSON. No WIT/schema typing (schema request returns a stub); slower
   (boot per invoke) but ANY wasi binary works unmodified.
