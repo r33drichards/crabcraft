@@ -7,7 +7,7 @@ description = "WIT-driven guest project generator for crabcraft"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-wit-parser = { version = "0.212", features = ["serde"] }
+wit-parser = { version = "0.251", features = ["serde"] }
 serde_json = "1"
 sha2 = "0.10"
 

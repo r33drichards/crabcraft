@@ -1,0 +1,14 @@
+// crabgen test fixture: resources are unsupported in v1 and must be rejected.
+package crab:bad@0.1.0;
+
+interface db {
+  resource connection {
+    query: func(sql: string) -> string;
+  }
+
+  open: func() -> connection;
+}
+
+world bad {
+  export db;
+}

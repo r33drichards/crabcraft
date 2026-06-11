@@ -1,0 +1,67 @@
+// crabgen test fixture: exercises EVERY WIRE section-1 type.
+// Versioned package, one exported interface, one imported interface (mesh).
+package crab:full@0.1.0;
+
+interface kitchen {
+  /// every primitive plus the anonymous compounds, in one record
+  record everything {
+    a-bool: bool,
+    a-u8: u8,
+    a-u16: u16,
+    a-u32: u32,
+    a-u64: u64,
+    a-s8: s8,
+    a-s16: s16,
+    a-s32: s32,
+    a-s64: s64,
+    a-f32: f32,
+    a-f64: f64,
+    a-char: char,
+    a-string: string,
+    a-list: list<u32>,
+    a-opt: option<string>,
+    a-tuple: tuple<u8, string, bool>,
+  }
+
+  enum color {
+    red,
+    green,
+    blue,
+  }
+
+  flags perms {
+    read,
+    write,
+    exec,
+  }
+
+  variant shape {
+    point,
+    circle(f32),
+    rect(tuple<f32, f32>),
+    boxed(everything),
+  }
+
+  echo-everything: func(e: everything) -> everything;
+  pick-color: func(c: color) -> color;
+  set-perms: func(p: perms) -> perms;
+  classify: func(s: shape) -> string;
+  try-divide: func(num: f64, den: f64) -> result<f64, string>;
+  maybe-list: func(xs: option<list<u16>>) -> list<option<bool>>;
+  no-result: func(x: u32);
+}
+
+interface telemetry {
+  record sample {
+    at: u64,
+    value: f64,
+  }
+
+  report: func(s: sample) -> result<_, string>;
+  ping: func() -> bool;
+}
+
+world full {
+  import telemetry;
+  export kitchen;
+}
