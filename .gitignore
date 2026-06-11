@@ -1,3 +1,4 @@
 target/
 *.o
 guest/sqlite-c/sqlite3.c
+.worktrees/
