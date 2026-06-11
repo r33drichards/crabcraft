@@ -49,6 +49,9 @@ interface kitchen {
   try-divide: func(num: f64, den: f64) -> result<f64, string>;
   maybe-list: func(xs: option<list<u16>>) -> list<option<bool>>;
   no-result: func(x: u32);
+  /// typed (non-string) err side: maps to the generic Result[T, E] in Go,
+  /// in both value position (the param) and function-result position
+  retry: func(prev: option<result<u32, color>>) -> result<u32, color>;
 }
 
 interface telemetry {

@@ -18,6 +18,14 @@ import (
 	"fmt"
 )
 
+// Result mirrors a WIT result<T, E> in value position: IsErr selects the
+// populated side; sides with no payload use struct{}.
+type Result[T any, E any] struct {
+	IsErr bool
+	Ok    T
+	Err   E
+}
+
 // Everything mirrors the WIT record `everything` (crab:full/kitchen@0.1.0).
 type Everything struct {
 	ABool   bool
@@ -374,7 +382,7 @@ type Impl interface {
 
 	// PickColor handles crab:full/kitchen@0.1.0#pick-color.
 	// A non-nil error is a function-level failure (status-1 reply).
-	PickColor(c_ Color) (Color, error)
+	PickColor(c Color) (Color, error)
 
 	// SetPerms handles crab:full/kitchen@0.1.0#set-perms.
 	// A non-nil error is a function-level failure (status-1 reply).
@@ -395,6 +403,10 @@ type Impl interface {
 	// NoResult handles crab:full/kitchen@0.1.0#no-result.
 	// A non-nil error is a function-level failure (status-1 reply).
 	NoResult(x uint32) error
+
+	// Retry handles crab:full/kitchen@0.1.0#retry.
+	// A non-nil error is a function-level failure (status-1 reply).
+	Retry(prev *Result[uint32, Color]) (Result[uint32, Color], error)
 }
 
 var impl Impl
@@ -437,8 +449,8 @@ func handleEchoEverything(d *Decoder) ([]byte, error) {
 }
 
 // decodePickColorArgs decodes the WIRE-encoded params of `pick-color`.
-func decodePickColorArgs(d *Decoder) (c_ Color, err error) {
-	c_, err = decodeColor(d)
+func decodePickColorArgs(d *Decoder) (c Color, err error) {
+	c, err = decodeColor(d)
 	if err != nil {
 		return
 	}
@@ -451,11 +463,11 @@ func handlePickColor(d *Decoder) ([]byte, error) {
 	if impl == nil {
 		return nil, errNoImpl
 	}
-	c_, err := decodePickColorArgs(d)
+	c, err := decodePickColorArgs(d)
 	if err != nil {
 		return nil, fmt.Errorf("bad params: %w", err)
 	}
-	r, err := impl.PickColor(c_)
+	r, err := impl.PickColor(c)
 	if err != nil {
 		return nil, err
 	}
@@ -640,6 +652,64 @@ func handleNoResult(d *Decoder) ([]byte, error) {
 	return nil, nil
 }
 
+// decodeRetryArgs decodes the WIRE-encoded params of `retry`.
+func decodeRetryArgs(d *Decoder) (prev *Result[uint32, Color], err error) {
+	var ok0 bool
+	ok0, err = d.OptionTag()
+	if err != nil {
+		return
+	}
+	if ok0 {
+		var x1 Result[uint32, Color]
+		var isErr2 bool
+		isErr2, err = d.ResultTag()
+		if err != nil {
+			return
+		}
+		x1.IsErr = isErr2
+		if isErr2 {
+			x1.Err, err = decodeColor(d)
+			if err != nil {
+				return
+			}
+		} else {
+			x1.Ok, err = d.U32()
+			if err != nil {
+				return
+			}
+		}
+		prev = &x1
+	}
+	err = d.Finish("params")
+	return
+}
+
+// handleRetry dispatches crab:full/kitchen@0.1.0#retry; registered in init().
+func handleRetry(d *Decoder) ([]byte, error) {
+	if impl == nil {
+		return nil, errNoImpl
+	}
+	prev, err := decodeRetryArgs(d)
+	if err != nil {
+		return nil, fmt.Errorf("bad params: %w", err)
+	}
+	r, err := impl.Retry(prev)
+	if err != nil {
+		return nil, err
+	}
+	var out []byte
+	out = EncodeResultTag(out, r.IsErr)
+	if r.IsErr {
+		out, err = encodeColor(out, r.Err)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		out = EncodeU32(out, r.Ok)
+	}
+	return out, nil
+}
+
 func init() {
 	handlers["crab:full/kitchen@0.1.0#echo-everything"] = handleEchoEverything
 	handlers["crab:full/kitchen@0.1.0#pick-color"] = handlePickColor
@@ -648,4 +718,5 @@ func init() {
 	handlers["crab:full/kitchen@0.1.0#try-divide"] = handleTryDivide
 	handlers["crab:full/kitchen@0.1.0#maybe-list"] = handleMaybeList
 	handlers["crab:full/kitchen@0.1.0#no-result"] = handleNoResult
+	handlers["crab:full/kitchen@0.1.0#retry"] = handleRetry
 }

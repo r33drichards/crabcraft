@@ -228,23 +228,19 @@ const PARAM_AVOID: &[&str] = &[
     "uint32",
     "uint64",
     "uintptr",
-    // locals in generated function bodies
+    // ONLY the generated locals that share a scope with WIT params (args
+    // decoders, handlers, mesh wrappers). Codec-helper locals (v, c, bits,
+    // i, n, set, payload...) live in functions with fixed signatures and
+    // never see a param, so they are deliberately NOT listed here.
     "d",
     "err",
     "out",
     "r",
-    "v",
-    "impl",
     "body",
-    "params",
     "workload",
     "msg",
-    "c",
-    "bits",
-    "set",
-    "i",
-    "n",
-    "payload",
+    "impl",
+    "isErr",
 ];
 
 pub struct GoBackend;
@@ -261,14 +257,18 @@ impl Backend for GoBackend {
     fn generate(&self, m: &Module, dir: &Path) -> Result<()> {
         let g = Gen::new(m, &project_name(dir)?)?;
         let gen_dir = dir.join("gen");
-        fs::write(gen_dir.join("runtime.go"), RUNTIME_GO)?;
-        fs::write(gen_dir.join("runtime_test.go"), RUNTIME_TEST_GO)?;
-        fs::write(gen_dir.join("schema.go"), schema_go())?;
-        fs::write(gen_dir.join("bindings.go"), g.bindings_go()?)?;
+        let write = |name: &str, content: &str| -> Result<()> {
+            let path = gen_dir.join(name);
+            fs::write(&path, content).with_context(|| format!("writing {}", path.display()))
+        };
+        write("runtime.go", RUNTIME_GO)?;
+        write("runtime_test.go", RUNTIME_TEST_GO)?;
+        write("schema.go", &schema_go())?;
+        write("bindings.go", &g.bindings_go()?)?;
         if !m.imports.is_empty() {
-            fs::write(gen_dir.join("mesh.go"), MESH_GO)?;
-            fs::write(gen_dir.join("mesh_wasm.go"), MESH_WASM_GO)?;
-            fs::write(gen_dir.join("imports.go"), g.imports_go()?)?;
+            write("mesh.go", MESH_GO)?;
+            write("mesh_wasm.go", MESH_WASM_GO)?;
+            write("imports.go", &g.imports_go()?)?;
         }
         Ok(())
     }
@@ -476,6 +476,48 @@ fn is_unit(ty: &Ty) -> bool {
     matches!(ty, Ty::Tuple(ts) if ts.is_empty())
 }
 
+/// Go type expression for a value-position type. `qual` is "" inside
+/// package gen, "gen." in impl.go signatures. `ind` is the indent level
+/// of the line the type starts on (anonymous tuple structs span lines).
+fn go_ty(ty: &Ty, qual: &str, ind: usize) -> Result<String> {
+    Ok(match ty {
+        Ty::List(t) => format!("[]{}", go_ty(t, qual, ind)?),
+        Ty::Option(t) => format!("*{}", go_ty(t, qual, ind)?),
+        Ty::Tuple(ts) => {
+            if ts.is_empty() {
+                "struct{}".to_string()
+            } else {
+                let fields = ts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| Ok((format!("F{i}"), go_ty(t, qual, ind + 1)?)))
+                    .collect::<Result<Vec<_>>>()?;
+                format!(
+                    "struct {{\n{}{}}}",
+                    align_fields(&fields, ind + 1),
+                    "\t".repeat(ind)
+                )
+            }
+        }
+        Ty::Result(ok, errt) => {
+            let side = |t: &Option<Box<Ty>>| -> Result<String> {
+                Ok(match t {
+                    Some(t) => go_ty(t, qual, ind)?,
+                    None => "struct{}".to_string(),
+                })
+            };
+            format!("{qual}Result[{}, {}]", side(ok)?, side(errt)?)
+        }
+        Ty::Named(n) => format!("{qual}{}", go_pascal(n)),
+        Ty::Record(_) | Ty::Variant(_) | Ty::Enum(_) | Ty::Flags(_) => {
+            bail!("internal error: anonymous {ty:?} cannot appear in value position (WIT names these)")
+        }
+        _ => scalar(ty)
+            .map(|(_, _, go)| go.to_string())
+            .ok_or_else(|| anyhow!("unmapped type {ty:?}"))?,
+    })
+}
+
 /// How a function's WIT result maps onto its Go signature.
 enum Ret<'a> {
     /// no WIT result → `error` (non-nil = status-1 reply)
@@ -501,6 +543,172 @@ impl<'a> Ret<'a> {
             Ret::ResTyped(t) => Some(t),
         }
     }
+}
+
+// -- encode / decode statement emission -----------------------------------
+
+/// Statements appending the WIRE encoding of `expr` (type `ty`) to `out`.
+fn emit_encode(w: &mut W, cx: &mut Cx, ty: &Ty, expr: &str) -> Result<()> {
+    match ty {
+        Ty::List(t) => {
+            w.line(format!("out = EncodeListLen(out, len({expr}))"));
+            let x = cx.fresh("x");
+            w.open(format!("for _, {x} := range {expr} {{"));
+            emit_encode(w, cx, t, &x)?;
+            w.close("}");
+        }
+        Ty::Option(t) => {
+            w.line(format!("out = EncodeOptionTag(out, {expr} != nil)"));
+            w.open(format!("if {expr} != nil {{"));
+            emit_encode_deref(w, cx, t, expr)?;
+            w.close("}");
+        }
+        Ty::Tuple(ts) => {
+            for (i, t) in ts.iter().enumerate() {
+                emit_encode(w, cx, t, &format!("{expr}.F{i}"))?;
+            }
+        }
+        Ty::Result(ok, errt) => {
+            w.line(format!("out = EncodeResultTag(out, {expr}.IsErr)"));
+            match (ok.as_deref(), errt.as_deref()) {
+                (Some(okt), Some(et)) => {
+                    w.open(format!("if {expr}.IsErr {{"));
+                    emit_encode(w, cx, et, &format!("{expr}.Err"))?;
+                    w.close("} else {");
+                    w.ind += 1;
+                    emit_encode(w, cx, okt, &format!("{expr}.Ok"))?;
+                    w.close("}");
+                }
+                (None, Some(et)) => {
+                    w.open(format!("if {expr}.IsErr {{"));
+                    emit_encode(w, cx, et, &format!("{expr}.Err"))?;
+                    w.close("}");
+                }
+                (Some(okt), None) => {
+                    w.open(format!("if !{expr}.IsErr {{"));
+                    emit_encode(w, cx, okt, &format!("{expr}.Ok"))?;
+                    w.close("}");
+                }
+                (None, None) => {}
+            }
+        }
+        Ty::Named(n) => {
+            cx.used_err = true;
+            w.line(format!("out, err = encode{}(out, {expr})", go_pascal(n)));
+            w.open("if err != nil {");
+            w.line(cx.ret);
+            w.close("}");
+        }
+        Ty::Record(_) | Ty::Variant(_) | Ty::Enum(_) | Ty::Flags(_) => {
+            bail!("internal error: anonymous {ty:?} in encode position")
+        }
+        _ => {
+            let (enc, _, _) = scalar(ty).ok_or_else(|| anyhow!("unmapped type {ty:?}"))?;
+            w.line(format!("out = {enc}(out, {expr})"));
+        }
+    }
+    Ok(())
+}
+
+/// Encode `*ptr` of type `ty`: copies into a temp first so member access
+/// stays unambiguous (`*p.F0` would parse as `*(p.F0)`).
+fn emit_encode_deref(w: &mut W, cx: &mut Cx, ty: &Ty, ptr: &str) -> Result<()> {
+    if is_unit(ty) {
+        return Ok(()); // zero bytes on the wire, nothing to reference
+    }
+    let x = cx.fresh("x");
+    w.line(format!("{x} := *{ptr}"));
+    emit_encode(w, cx, ty, &x)
+}
+
+/// Statements decoding a value of `ty` from `d` into lvalue `dest`.
+/// Every surrounding function uses named results, so the error path is a
+/// plain `return`.
+fn emit_decode(w: &mut W, cx: &mut Cx, ty: &Ty, dest: &str) -> Result<()> {
+    let errcheck = |w: &mut W| {
+        w.open("if err != nil {");
+        w.line("return");
+        w.close("}");
+    };
+    match ty {
+        Ty::List(t) => {
+            let n = cx.fresh("n");
+            w.line(format!("var {n} int"));
+            w.line(format!("{n}, err = d.ListLen()"));
+            errcheck(w);
+            // the count is attacker-controlled: clamp pre-allocation
+            // (crab-sdk caps initial capacity at 4096) and append
+            w.line(format!(
+                "{dest} = make({}, 0, min({n}, 4096))",
+                go_ty(ty, "", w.ind)?
+            ));
+            let i = cx.fresh("i");
+            w.open(format!("for {i} := 0; {i} < {n}; {i}++ {{"));
+            let x = cx.fresh("x");
+            w.line(format!("var {x} {}", go_ty(t, "", w.ind)?));
+            emit_decode(w, cx, t, &x)?;
+            w.line(format!("{dest} = append({dest}, {x})"));
+            w.close("}");
+        }
+        Ty::Option(t) => {
+            let ok = cx.fresh("ok");
+            w.line(format!("var {ok} bool"));
+            w.line(format!("{ok}, err = d.OptionTag()"));
+            errcheck(w);
+            w.open(format!("if {ok} {{"));
+            let x = cx.fresh("x");
+            w.line(format!("var {x} {}", go_ty(t, "", w.ind)?));
+            emit_decode(w, cx, t, &x)?;
+            w.line(format!("{dest} = &{x}"));
+            w.close("}");
+        }
+        Ty::Tuple(ts) => {
+            for (i, t) in ts.iter().enumerate() {
+                emit_decode(w, cx, t, &format!("{dest}.F{i}"))?;
+            }
+        }
+        Ty::Result(ok, errt) => {
+            let tag = cx.fresh("isErr");
+            w.line(format!("var {tag} bool"));
+            w.line(format!("{tag}, err = d.ResultTag()"));
+            errcheck(w);
+            w.line(format!("{dest}.IsErr = {tag}"));
+            match (ok.as_deref(), errt.as_deref()) {
+                (Some(okt), Some(et)) => {
+                    w.open(format!("if {tag} {{"));
+                    emit_decode(w, cx, et, &format!("{dest}.Err"))?;
+                    w.close("} else {");
+                    w.ind += 1;
+                    emit_decode(w, cx, okt, &format!("{dest}.Ok"))?;
+                    w.close("}");
+                }
+                (None, Some(et)) => {
+                    w.open(format!("if {tag} {{"));
+                    emit_decode(w, cx, et, &format!("{dest}.Err"))?;
+                    w.close("}");
+                }
+                (Some(okt), None) => {
+                    w.open(format!("if !{tag} {{"));
+                    emit_decode(w, cx, okt, &format!("{dest}.Ok"))?;
+                    w.close("}");
+                }
+                (None, None) => {}
+            }
+        }
+        Ty::Named(n) => {
+            w.line(format!("{dest}, err = decode{}(d)", go_pascal(n)));
+            errcheck(w);
+        }
+        Ty::Record(_) | Ty::Variant(_) | Ty::Enum(_) | Ty::Flags(_) => {
+            bail!("internal error: anonymous {ty:?} in decode position")
+        }
+        _ => {
+            let (_, dec, _) = scalar(ty).ok_or_else(|| anyhow!("unmapped type {ty:?}"))?;
+            w.line(format!("{dest}, err = d.{dec}()"));
+            errcheck(w);
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -563,6 +771,18 @@ impl<'a> Gen<'a> {
                 claim(format!("encode{p}"), what.clone())?;
                 claim(format!("decode{p}"), what.clone())?;
                 match &t.ty {
+                    // struct fields are their own (per-type) identifier scope
+                    Ty::Record(fields) => {
+                        let mut seen: HashMap<String, &str> = HashMap::new();
+                        for (fname, _) in fields {
+                            let fp = go_pascal(fname);
+                            if let Some(prev) = seen.insert(fp.clone(), fname) {
+                                bail!(
+                                    "{what}: fields `{prev}` and `{fname}` both map to Go field `{fp}`; rename one in the WIT"
+                                );
+                            }
+                        }
+                    }
                     Ty::Enum(cases) => {
                         for c in cases {
                             claim(format!("{p}{}", go_pascal(c)), format!("{what} case `{c}`"))?;
@@ -581,10 +801,27 @@ impl<'a> Gen<'a> {
                         }
                     }
                     Ty::Variant(cases) => {
-                        for (c, _) in cases {
+                        // payload cases become struct fields next to the
+                        // generated Tag discriminant: that struct is its own
+                        // identifier scope, with Tag pre-reserved
+                        let mut fields: HashMap<String, String> = HashMap::new();
+                        fields.insert(
+                            "Tag".to_string(),
+                            "the generated Tag discriminant".to_string(),
+                        );
+                        for (c, payload) in cases {
                             let cp = go_pascal(c);
                             claim(format!("{p}Tag{cp}"), format!("{what} case `{c}`"))?;
                             claim(format!("New{p}{cp}"), format!("{what} case `{c}`"))?;
+                            if payload.is_some() {
+                                if let Some(prev) =
+                                    fields.insert(cp.clone(), format!("payload case `{c}`"))
+                                {
+                                    bail!(
+                                        "{what}: payload case `{c}` maps to Go field `{cp}`, which collides with {prev}; rename it in the WIT"
+                                    );
+                                }
+                            }
                         }
                     }
                     _ => {}
@@ -672,7 +909,7 @@ impl<'a> Gen<'a> {
                 Ty::List(t) | Ty::Option(t) => walk(t),
                 Ty::Tuple(ts) => ts.iter().any(walk),
                 Ty::Record(fs) => fs.iter().any(|(_, t)| walk(t)),
-                Ty::Variant(cs) => cs.iter().any(|(_, t)| t.as_ref().is_some_and(|t| walk(t))),
+                Ty::Variant(cs) => cs.iter().any(|(_, t)| t.as_ref().is_some_and(walk)),
                 _ => false,
             }
         }
@@ -700,57 +937,13 @@ impl<'a> Gen<'a> {
         Ok(false)
     }
 
-    // -- type rendering -------------------------------------------------------
-
-    /// Go type expression for a value-position type. `qual` is "" inside
-    /// package gen, "gen." in impl.go signatures. `ind` is the indent level
-    /// of the line the type starts on (anonymous tuple structs span lines).
-    fn go_ty(&self, ty: &Ty, qual: &str, ind: usize) -> Result<String> {
-        Ok(match ty {
-            Ty::List(t) => format!("[]{}", self.go_ty(t, qual, ind)?),
-            Ty::Option(t) => format!("*{}", self.go_ty(t, qual, ind)?),
-            Ty::Tuple(ts) => {
-                if ts.is_empty() {
-                    "struct{}".to_string()
-                } else {
-                    let fields = ts
-                        .iter()
-                        .enumerate()
-                        .map(|(i, t)| Ok((format!("F{i}"), self.go_ty(t, qual, ind + 1)?)))
-                        .collect::<Result<Vec<_>>>()?;
-                    format!(
-                        "struct {{\n{}{}}}",
-                        align_fields(&fields, ind + 1),
-                        "\t".repeat(ind)
-                    )
-                }
-            }
-            Ty::Result(ok, errt) => {
-                let side = |t: &Option<Box<Ty>>| -> Result<String> {
-                    Ok(match t {
-                        Some(t) => self.go_ty(t, qual, ind)?,
-                        None => "struct{}".to_string(),
-                    })
-                };
-                format!("{qual}Result[{}, {}]", side(ok)?, side(errt)?)
-            }
-            Ty::Named(n) => format!("{qual}{}", go_pascal(n)),
-            Ty::Record(_) | Ty::Variant(_) | Ty::Enum(_) | Ty::Flags(_) => {
-                bail!("internal error: anonymous {ty:?} cannot appear in value position (WIT names these)")
-            }
-            _ => scalar(ty)
-                .map(|(_, _, go)| go.to_string())
-                .ok_or_else(|| anyhow!("unmapped type {ty:?}"))?,
-        })
-    }
-
     /// Go zero-value expression for a type (used by the scaffolded stubs).
     fn zero(&self, ty: &Ty, qual: &str, ind: usize) -> Result<String> {
         Ok(match ty {
             Ty::Bool => "false".to_string(),
             Ty::String => "\"\"".to_string(),
             Ty::List(_) | Ty::Option(_) => "nil".to_string(),
-            Ty::Tuple(_) | Ty::Result(..) => format!("{}{{}}", self.go_ty(ty, qual, ind)?),
+            Ty::Tuple(_) | Ty::Result(..) => format!("{}{{}}", go_ty(ty, qual, ind)?),
             Ty::Named(n) => match self.resolve(ty)? {
                 Ty::Record(_) | Ty::Variant(_) => format!("{qual}{}{{}}", go_pascal(n)),
                 Ty::Enum(_) | Ty::Flags(_) => "0".to_string(),
@@ -758,172 +951,6 @@ impl<'a> Gen<'a> {
             },
             _ => "0".to_string(), // ints, floats, char
         })
-    }
-
-    // -- encode / decode statement emission -----------------------------------
-
-    /// Statements appending the WIRE encoding of `expr` (type `ty`) to `out`.
-    fn emit_encode(&self, w: &mut W, cx: &mut Cx, ty: &Ty, expr: &str) -> Result<()> {
-        match ty {
-            Ty::List(t) => {
-                w.line(format!("out = EncodeListLen(out, len({expr}))"));
-                let x = cx.fresh("x");
-                w.open(format!("for _, {x} := range {expr} {{"));
-                self.emit_encode(w, cx, t, &x)?;
-                w.close("}");
-            }
-            Ty::Option(t) => {
-                w.line(format!("out = EncodeOptionTag(out, {expr} != nil)"));
-                w.open(format!("if {expr} != nil {{"));
-                self.emit_encode_deref(w, cx, t, expr)?;
-                w.close("}");
-            }
-            Ty::Tuple(ts) => {
-                for (i, t) in ts.iter().enumerate() {
-                    self.emit_encode(w, cx, t, &format!("{expr}.F{i}"))?;
-                }
-            }
-            Ty::Result(ok, errt) => {
-                w.line(format!("out = EncodeResultTag(out, {expr}.IsErr)"));
-                match (ok.as_deref(), errt.as_deref()) {
-                    (Some(okt), Some(et)) => {
-                        w.open(format!("if {expr}.IsErr {{"));
-                        self.emit_encode(w, cx, et, &format!("{expr}.Err"))?;
-                        w.close("} else {");
-                        w.ind += 1;
-                        self.emit_encode(w, cx, okt, &format!("{expr}.Ok"))?;
-                        w.close("}");
-                    }
-                    (None, Some(et)) => {
-                        w.open(format!("if {expr}.IsErr {{"));
-                        self.emit_encode(w, cx, et, &format!("{expr}.Err"))?;
-                        w.close("}");
-                    }
-                    (Some(okt), None) => {
-                        w.open(format!("if !{expr}.IsErr {{"));
-                        self.emit_encode(w, cx, okt, &format!("{expr}.Ok"))?;
-                        w.close("}");
-                    }
-                    (None, None) => {}
-                }
-            }
-            Ty::Named(n) => {
-                cx.used_err = true;
-                w.line(format!("out, err = encode{}(out, {expr})", go_pascal(n)));
-                w.open("if err != nil {");
-                w.line(cx.ret);
-                w.close("}");
-            }
-            Ty::Record(_) | Ty::Variant(_) | Ty::Enum(_) | Ty::Flags(_) => {
-                bail!("internal error: anonymous {ty:?} in encode position")
-            }
-            _ => {
-                let (enc, _, _) = scalar(ty).ok_or_else(|| anyhow!("unmapped type {ty:?}"))?;
-                w.line(format!("out = {enc}(out, {expr})"));
-            }
-        }
-        Ok(())
-    }
-
-    /// Encode `*ptr` of type `ty`: copies into a temp first so member access
-    /// stays unambiguous (`*p.F0` would parse as `*(p.F0)`).
-    fn emit_encode_deref(&self, w: &mut W, cx: &mut Cx, ty: &Ty, ptr: &str) -> Result<()> {
-        if is_unit(ty) {
-            return Ok(()); // zero bytes on the wire, nothing to reference
-        }
-        let x = cx.fresh("x");
-        w.line(format!("{x} := *{ptr}"));
-        self.emit_encode(w, cx, ty, &x)
-    }
-
-    /// Statements decoding a value of `ty` from `d` into lvalue `dest`.
-    /// Every surrounding function uses named results, so the error path is a
-    /// plain `return`.
-    fn emit_decode(&self, w: &mut W, cx: &mut Cx, ty: &Ty, dest: &str) -> Result<()> {
-        let errcheck = |w: &mut W| {
-            w.open("if err != nil {");
-            w.line("return");
-            w.close("}");
-        };
-        match ty {
-            Ty::List(t) => {
-                let n = cx.fresh("n");
-                w.line(format!("var {n} int"));
-                w.line(format!("{n}, err = d.ListLen()"));
-                errcheck(w);
-                // the count is attacker-controlled: clamp pre-allocation
-                // (crab-sdk caps initial capacity at 4096) and append
-                w.line(format!(
-                    "{dest} = make({}, 0, min({n}, 4096))",
-                    self.go_ty(ty, "", w.ind)?
-                ));
-                let i = cx.fresh("i");
-                w.open(format!("for {i} := 0; {i} < {n}; {i}++ {{"));
-                let x = cx.fresh("x");
-                w.line(format!("var {x} {}", self.go_ty(t, "", w.ind)?));
-                self.emit_decode(w, cx, t, &x)?;
-                w.line(format!("{dest} = append({dest}, {x})"));
-                w.close("}");
-            }
-            Ty::Option(t) => {
-                let ok = cx.fresh("ok");
-                w.line(format!("var {ok} bool"));
-                w.line(format!("{ok}, err = d.OptionTag()"));
-                errcheck(w);
-                w.open(format!("if {ok} {{"));
-                let x = cx.fresh("x");
-                w.line(format!("var {x} {}", self.go_ty(t, "", w.ind)?));
-                self.emit_decode(w, cx, t, &x)?;
-                w.line(format!("{dest} = &{x}"));
-                w.close("}");
-            }
-            Ty::Tuple(ts) => {
-                for (i, t) in ts.iter().enumerate() {
-                    self.emit_decode(w, cx, t, &format!("{dest}.F{i}"))?;
-                }
-            }
-            Ty::Result(ok, errt) => {
-                let tag = cx.fresh("isErr");
-                w.line(format!("var {tag} bool"));
-                w.line(format!("{tag}, err = d.ResultTag()"));
-                errcheck(w);
-                w.line(format!("{dest}.IsErr = {tag}"));
-                match (ok.as_deref(), errt.as_deref()) {
-                    (Some(okt), Some(et)) => {
-                        w.open(format!("if {tag} {{"));
-                        self.emit_decode(w, cx, et, &format!("{dest}.Err"))?;
-                        w.close("} else {");
-                        w.ind += 1;
-                        self.emit_decode(w, cx, okt, &format!("{dest}.Ok"))?;
-                        w.close("}");
-                    }
-                    (None, Some(et)) => {
-                        w.open(format!("if {tag} {{"));
-                        self.emit_decode(w, cx, et, &format!("{dest}.Err"))?;
-                        w.close("}");
-                    }
-                    (Some(okt), None) => {
-                        w.open(format!("if !{tag} {{"));
-                        self.emit_decode(w, cx, okt, &format!("{dest}.Ok"))?;
-                        w.close("}");
-                    }
-                    (None, None) => {}
-                }
-            }
-            Ty::Named(n) => {
-                w.line(format!("{dest}, err = decode{}(d)", go_pascal(n)));
-                errcheck(w);
-            }
-            Ty::Record(_) | Ty::Variant(_) | Ty::Enum(_) | Ty::Flags(_) => {
-                bail!("internal error: anonymous {ty:?} in decode position")
-            }
-            _ => {
-                let (_, dec, _) = scalar(ty).ok_or_else(|| anyhow!("unmapped type {ty:?}"))?;
-                w.line(format!("{dest}, err = d.{dec}()"));
-                errcheck(w);
-            }
-        }
-        Ok(())
     }
 
     // -- named type declarations + codec helpers ------------------------------
@@ -938,7 +965,7 @@ impl<'a> Gen<'a> {
                 ));
                 let fs = fields
                     .iter()
-                    .map(|(n, ft)| Ok((go_pascal(n), self.go_ty(ft, "", 1)?)))
+                    .map(|(n, ft)| Ok((go_pascal(n), go_ty(ft, "", 1)?)))
                     .collect::<Result<Vec<_>>>()?;
                 w.line(format!("type {p} struct {{"));
                 w.buf.push_str(&align_fields(&fs, 1));
@@ -955,14 +982,14 @@ impl<'a> Gen<'a> {
                     "// {p} aliases the WIT type `{}` ({}).",
                     t.wit_name, iface.instance
                 ));
-                w.line(format!("type {p} = {}", self.go_ty(other, "", 0)?));
+                w.line(format!("type {p} = {}", go_ty(other, "", 0)?));
                 w.line("");
                 let body = self.encode_helper_body(other, "v")?;
                 self.write_encode_helper(w, &p, body);
                 let mut cx = Cx::new("return");
                 let mut bw = W::new();
                 bw.ind = 1;
-                self.emit_decode(&mut bw, &mut cx, other, "v")?;
+                emit_decode(&mut bw, &mut cx, other, "v")?;
                 self.write_decode_helper(w, &p, &bw.buf);
             }
         }
@@ -974,7 +1001,7 @@ impl<'a> Gen<'a> {
         let mut bw = W::new();
         bw.ind = 1;
         for (n, ft) in fields {
-            self.emit_encode(&mut bw, &mut cx, ft, &format!("v.{}", go_pascal(n)))?;
+            emit_encode(&mut bw, &mut cx, ft, &format!("v.{}", go_pascal(n)))?;
         }
         let mut body = bw.buf;
         if cx.used_err {
@@ -986,7 +1013,7 @@ impl<'a> Gen<'a> {
         let mut bw = W::new();
         bw.ind = 1;
         for (n, ft) in fields {
-            self.emit_decode(&mut bw, &mut cx, ft, &format!("v.{}", go_pascal(n)))?;
+            emit_decode(&mut bw, &mut cx, ft, &format!("v.{}", go_pascal(n)))?;
         }
         self.write_decode_helper(w, p, &bw.buf);
         Ok(())
@@ -1015,7 +1042,7 @@ impl<'a> Gen<'a> {
         let mut cx = Cx::new("return nil, err");
         let mut bw = W::new();
         bw.ind = 1;
-        self.emit_encode(&mut bw, &mut cx, ty, expr)?;
+        emit_encode(&mut bw, &mut cx, ty, expr)?;
         let mut body = bw.buf;
         if cx.used_err {
             body = format!("\tvar err error\n{body}");
@@ -1131,7 +1158,7 @@ impl<'a> Gen<'a> {
         let mut fields = vec![("Tag".to_string(), "int".to_string())];
         for (c, payload) in cases {
             if let Some(pt) = payload {
-                fields.push((go_pascal(c), format!("*{}", self.go_ty(pt, "", 1)?)));
+                fields.push((go_pascal(c), format!("*{}", go_ty(pt, "", 1)?)));
             }
         }
         w.line(format!("type {p} struct {{"));
@@ -1160,7 +1187,7 @@ impl<'a> Gen<'a> {
                 Some(pt) => {
                     w.open(format!(
                         "func New{p}{cp}(payload {}) {p} {{",
-                        self.go_ty(pt, "", 0)?
+                        go_ty(pt, "", 0)?
                     ));
                     w.line(format!("return {p}{{Tag: {p}Tag{cp}, {cp}: &payload}}"));
                     w.close("}");
@@ -1188,7 +1215,7 @@ impl<'a> Gen<'a> {
                     ));
                     bw.close("}");
                     bw.line(format!("out = EncodeCase(out, {i})"));
-                    self.emit_encode_deref(&mut bw, &mut cx, pt, &format!("v.{cp}"))?;
+                    emit_encode_deref(&mut bw, &mut cx, pt, &format!("v.{cp}"))?;
                 }
             }
         }
@@ -1223,8 +1250,8 @@ impl<'a> Gen<'a> {
                 bw.line(format!("case {i}:"));
                 bw.ind += 1;
                 let x = cx.fresh("x");
-                bw.line(format!("var {x} {}", self.go_ty(pt, "", bw.ind)?));
-                self.emit_decode(&mut bw, &mut cx, pt, &x)?;
+                bw.line(format!("var {x} {}", go_ty(pt, "", bw.ind)?));
+                emit_decode(&mut bw, &mut cx, pt, &x)?;
                 bw.line(format!("v.{} = &{x}", go_pascal(c)));
             }
             bw.close("}");
@@ -1241,11 +1268,11 @@ impl<'a> Gen<'a> {
         let params = f
             .params
             .iter()
-            .map(|(n, t)| Ok(format!("{} {}", go_param(n), self.go_ty(t, qual, 0)?)))
+            .map(|(n, t)| Ok(format!("{} {}", go_param(n), go_ty(t, qual, 0)?)))
             .collect::<Result<Vec<_>>>()?
             .join(", ");
         let ret = match self.classify(f)?.value_ty() {
-            Some(t) => format!("({}, error)", self.go_ty(t, qual, 0)?),
+            Some(t) => format!("({}, error)", go_ty(t, qual, 0)?),
             None => "error".to_string(),
         };
         Ok(format!("{}({params}) {ret}", go_pascal(&f.wit_name)))
@@ -1287,9 +1314,7 @@ impl<'a> Gen<'a> {
         }
 
         let export = &self.m.exports[0];
-        w.line(format!(
-            "// Impl is the application interface: one method per function exported by"
-        ));
+        w.line("// Impl is the application interface: one method per function exported by");
         w.line(format!(
             "// {}. impl.go implements it and registers the implementation",
             export.instance
@@ -1357,6 +1382,9 @@ impl<'a> Gen<'a> {
         out.push_str("// function-level failure: the runtime replies status 1 with\n");
         out.push_str("// \"<function>: <message>\".\n");
         out.push_str("package gen\n");
+        // NB: imports_block is a substring scan that sees comments too: a
+        // generated doc comment containing "fmt." or "errors." needlessly
+        // forces the import (harmless) — it can over-include, never miss.
         out.push_str(&imports_block(&w.buf));
         out.push_str(&w.buf);
         Ok(trim_final(&out))
@@ -1368,7 +1396,7 @@ impl<'a> Gen<'a> {
         let p = go_pascal(&f.wit_name);
         let mut sig_params = Vec::new();
         for (n, t) in &f.params {
-            sig_params.push(format!("{} {}", go_param(n), self.go_ty(t, "", 0)?));
+            sig_params.push(format!("{} {}", go_param(n), go_ty(t, "", 0)?));
         }
         sig_params.push("err error".to_string());
         w.line(format!(
@@ -1382,7 +1410,7 @@ impl<'a> Gen<'a> {
         let mut cx = Cx::new("return");
         for (n, t) in &f.params {
             let dest = go_param(n);
-            self.emit_decode(w, &mut cx, t, &dest)?;
+            emit_decode(w, &mut cx, t, &dest)?;
         }
         w.line("err = d.Finish(\"params\")");
         w.line("return");
@@ -1423,7 +1451,7 @@ impl<'a> Gen<'a> {
                 w.close("}");
                 w.line("var out []byte");
                 let mut cx = Cx::new("return nil, err");
-                self.emit_encode(w, &mut cx, t, "r")?;
+                emit_encode(w, &mut cx, t, "r")?;
                 w.line("return out, nil");
             }
             Ret::ResStr { ok, has_msg } => {
@@ -1444,7 +1472,7 @@ impl<'a> Gen<'a> {
                 w.line("out = EncodeResultTag(out, false)");
                 if let Some(okt) = ok {
                     let mut cx = Cx::new("return nil, err");
-                    self.emit_encode(w, &mut cx, okt, "r")?;
+                    emit_encode(w, &mut cx, okt, "r")?;
                 }
                 w.line("return out, nil");
             }
@@ -1455,7 +1483,7 @@ impl<'a> Gen<'a> {
                 w.close("}");
                 w.line("var out []byte");
                 let mut cx = Cx::new("return nil, err");
-                self.emit_encode(w, &mut cx, t, "r")?;
+                emit_encode(w, &mut cx, t, "r")?;
                 w.line("return out, nil");
             }
         }
@@ -1485,6 +1513,9 @@ impl<'a> Gen<'a> {
         out.push_str("// decodes the reply. The caller names the target deployment — crabgen\n");
         out.push_str("// never bakes one in; placement is the host's problem.\n");
         out.push_str("package gen\n");
+        // NB: imports_block is a substring scan that sees comments too: a
+        // generated doc comment containing "fmt." or "errors." needlessly
+        // forces the import (harmless) — it can over-include, never miss.
         out.push_str(&imports_block(&w.buf));
         out.push_str(&w.buf);
         Ok(trim_final(&out))
@@ -1496,16 +1527,14 @@ impl<'a> Gen<'a> {
         let ret = self.classify(f)?;
         let mut sig_params = vec!["workload string".to_string()];
         for (n, t) in &f.params {
-            sig_params.push(format!("{} {}", go_param(n), self.go_ty(t, "", 0)?));
+            sig_params.push(format!("{} {}", go_param(n), go_ty(t, "", 0)?));
         }
         let sig_ret = match ret.value_ty() {
-            Some(t) => format!("(r {}, err error)", self.go_ty(t, "", 0)?),
+            Some(t) => format!("(r {}, err error)", go_ty(t, "", 0)?),
             None => "(err error)".to_string(),
         };
         w.line(format!("// {name} calls {addr} on the workload named"));
-        w.line(
-            "// `workload` through the host mesh. The returned error covers transport".to_string(),
-        );
+        w.line("// `workload` through the host mesh. The returned error covers transport");
         let res_note = match ret {
             Ret::ResStr { .. } => {
                 "// failures, remote status-1 failures, AND the WIT result err case."
@@ -1524,7 +1553,7 @@ impl<'a> Gen<'a> {
             w.line("var out []byte");
             let mut cx = Cx::new("return");
             for (n, t) in &f.params {
-                self.emit_encode(w, &mut cx, t, &go_param(n))?;
+                emit_encode(w, &mut cx, t, &go_param(n))?;
             }
             "out".to_string()
         };
@@ -1543,13 +1572,13 @@ impl<'a> Gen<'a> {
             }
             Ret::Plain(t) => {
                 let mut cx = Cx::new("return");
-                self.emit_decode(w, &mut cx, t, "r")?;
+                emit_decode(w, &mut cx, t, "r")?;
                 w.line("err = d.Finish(\"reply\")");
                 w.line("return");
             }
             Ret::ResTyped(t) => {
                 let mut cx = Cx::new("return");
-                self.emit_decode(w, &mut cx, t, "r")?;
+                emit_decode(w, &mut cx, t, "r")?;
                 w.line("err = d.Finish(\"reply\")");
                 w.line("return");
             }
@@ -1583,7 +1612,7 @@ impl<'a> Gen<'a> {
                 w.line("return");
                 w.close("}");
                 if let Some(okt) = ok {
-                    self.emit_decode(w, &mut cx, okt, "r")?;
+                    emit_decode(w, &mut cx, okt, "r")?;
                 }
                 w.line("err = d.Finish(\"reply\")");
                 w.line("return");
@@ -1787,8 +1816,13 @@ mod tests {
         assert_eq!(go_param("type"), "type_"); // Go keyword
         assert_eq!(go_param("len"), "len_"); // predeclared
         assert_eq!(go_param("err"), "err_"); // generated local
+        assert_eq!(go_param("is-err"), "isErr_"); // mesh-wrapper local
         assert_eq!(go_param("x0"), "x0_"); // temp-shaped
         assert_eq!(go_param("xs"), "xs"); // not temp-shaped
+                                          // codec-helper locals never share a scope with params: no mangling
+        assert_eq!(go_param("c"), "c");
+        assert_eq!(go_param("v"), "v");
+        assert_eq!(go_param("bits"), "bits");
     }
 
     #[test]
@@ -1816,5 +1850,77 @@ mod tests {
     fn iface_short_strips_namespace_and_version() {
         assert_eq!(iface_short("crab:full/telemetry@0.1.0"), "telemetry");
         assert_eq!(iface_short("crab:full/kitchen"), "kitchen");
+    }
+
+    /// Top-level identifiers declared by a Go source file: `func Name(`
+    /// (methods and init skipped), `type|var|const Name`, and the names
+    /// inside `var (` / `const (` groups. Good enough for our templates —
+    /// no generics, no multi-name single-line declarations.
+    fn go_top_level_idents(src: &str) -> Vec<String> {
+        fn first_ident(s: &str) -> Option<String> {
+            let name: String = s
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            (!name.is_empty()).then_some(name)
+        }
+        let mut out = Vec::new();
+        let mut in_group = false;
+        for line in src.lines() {
+            if in_group {
+                let t = line.trim();
+                if t == ")" {
+                    in_group = false;
+                } else if !t.is_empty() && !t.starts_with("//") {
+                    out.extend(first_ident(t));
+                }
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("func ") {
+                if !rest.starts_with('(') {
+                    // a plain function; methods (`func (recv)`) aren't pkg idents
+                    if let Some(name) = first_ident(rest) {
+                        if name != "init" {
+                            out.push(name);
+                        }
+                    }
+                }
+            } else if let Some(rest) = ["type ", "var ", "const "]
+                .iter()
+                .find_map(|kw| line.strip_prefix(kw))
+            {
+                if rest.starts_with('(') {
+                    in_group = true;
+                } else {
+                    out.extend(first_ident(rest));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn template_identifiers_are_all_reserved() {
+        // Guards silent drift: adding a top-level name to a template without
+        // also reserving it would let WIT names collide with it undetected.
+        for (file, src) in [
+            ("runtime.go", RUNTIME_GO),
+            ("runtime_test.go", RUNTIME_TEST_GO),
+            ("mesh.go", MESH_GO),
+            ("mesh_wasm.go", MESH_WASM_GO),
+        ] {
+            let idents = go_top_level_idents(src);
+            assert!(
+                !idents.is_empty(),
+                "{file}: the ident scan found nothing — parser broken?"
+            );
+            for ident in idents {
+                assert!(
+                    RESERVED.contains(&ident.as_str()),
+                    "{file} declares top-level `{ident}` but RESERVED doesn't list it; \
+                     add it so WIT-name collisions stay detectable"
+                );
+            }
+        }
     }
 }

@@ -23,7 +23,7 @@ fn full_fixture_loads_into_ir() {
     assert_eq!(m.exports.len(), 1, "exactly one exported interface");
     let kitchen = &m.exports[0];
     assert_eq!(kitchen.instance, "crab:full/kitchen@0.1.0");
-    assert_eq!(kitchen.funcs.len(), 7);
+    assert_eq!(kitchen.funcs.len(), 8);
 
     assert_eq!(m.imports.len(), 1, "one imported interface for mesh stubs");
     let telemetry = &m.imports[0];

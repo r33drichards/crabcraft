@@ -200,8 +200,8 @@ fn go_missing_impls_reports_typed_signatures() {
     let missing = backend.missing_impls(&module, &dir).unwrap();
     assert_eq!(
         missing.len(),
-        7,
-        "full.wit exports 7 functions: {missing:#?}"
+        8,
+        "full.wit exports 8 functions: {missing:#?}"
     );
     let all = missing.join("\n");
     assert!(
@@ -215,6 +215,12 @@ fn go_missing_impls_reports_typed_signatures() {
     assert!(
         all.contains("func (App) NoResult(x uint32) error"),
         "no-result funcs map to a bare error return:\n{all}"
+    );
+    assert!(
+        all.contains(
+            "func (App) Retry(prev *gen.Result[uint32, gen.Color]) (gen.Result[uint32, gen.Color], error)"
+        ),
+        "typed-E results map to the generic Result[T, E]:\n{all}"
     );
 }
 
@@ -260,6 +266,117 @@ world solo {
     assert!(
         unformatted.trim().is_empty(),
         "no-imports project is not gofmt-clean:\n{unformatted}"
+    );
+}
+
+/// Generate (no scaffold) a project from inline WIT at <root>/guest/<name>;
+/// returns the result of generate() so error-path tests can inspect it.
+fn gen_inline(
+    root: &Path,
+    name: &str,
+    wit: &str,
+) -> (crabgen::ir::Module, PathBuf, anyhow::Result<()>) {
+    let dir = root.join("guest").join(name);
+    fs::create_dir_all(dir.join("gen")).unwrap();
+    fs::write(dir.join(format!("{name}.wit")), wit).unwrap();
+    let module = wit::load(&dir.join(format!("{name}.wit"))).unwrap();
+    let backend = backend_for("go").unwrap();
+    let res = backend.generate(&module, &dir);
+    (module, dir, res)
+}
+
+#[test]
+fn go_param_named_is_err_compiles() {
+    // The mesh wrapper for a result-returning import declares `var isErr
+    // bool` in the same scope as the function params, so a WIT param
+    // `is-err` (→ lowerCamel `isErr`) must be mangled away from it.
+    let tmp = tempfile::tempdir().unwrap();
+    let wit = r#"package crab:meshy@0.1.0;
+
+interface api {
+  noop: func();
+}
+
+interface sender {
+  send: func(is-err: bool) -> result<_, string>;
+}
+
+world meshy {
+  import sender;
+  export api;
+}
+"#;
+    let (module, dir, res) = gen_inline(tmp.path(), "meshy", wit);
+    res.expect("generate");
+    let backend = backend_for("go").unwrap();
+    backend.scaffold(&module, &dir).expect("scaffold");
+    fs::write(dir.join("gen/schema.json"), &module.schema_json).unwrap();
+
+    let mut build = go_cmd("go");
+    build.args(["build", "./..."]);
+    run_in(&dir, build, "go build (is-err param project)");
+}
+
+#[test]
+fn go_record_field_collision_is_an_error() {
+    // WIT words are lowercase OR all-caps acronyms: `a-b` and `AB` both
+    // Go-case to field `AB`. Silently emitting a struct with duplicate
+    // fields would be broken Go, so generate() must refuse.
+    let tmp = tempfile::tempdir().unwrap();
+    let wit = r#"package crab:dupfield@0.1.0;
+
+interface api {
+  record r {
+    a-b: u32,
+    %AB: u32,
+  }
+
+  get-it: func() -> r;
+}
+
+world dupfield {
+  export api;
+}
+"#;
+    let (_module, _dir, res) = gen_inline(tmp.path(), "dupfield", wit);
+    let msg = format!(
+        "{:#}",
+        res.expect_err("duplicate Go field names must fail generate()")
+    );
+    assert!(
+        msg.contains("a-b") && msg.contains("AB"),
+        "error must name both WIT fields and the colliding Go field: {msg}"
+    );
+}
+
+#[test]
+fn go_variant_case_named_tag_is_an_error() {
+    // A payload case named `tag` would emit a `Tag *u32` field colliding
+    // with the generated `Tag int` discriminant.
+    let tmp = tempfile::tempdir().unwrap();
+    let wit = r#"package crab:tagged@0.1.0;
+
+interface api {
+  variant v {
+    tag(u32),
+    other,
+  }
+
+  get-it: func() -> v;
+}
+
+world tagged {
+  export api;
+}
+"#;
+    let (_module, _dir, res) = gen_inline(tmp.path(), "tagged", wit);
+    let msg = format!(
+        "{:#}",
+        res.expect_err("payload case `tag` must fail generate()")
+    );
+    assert!(
+        msg.contains("Tag") && msg.contains("tag"),
+        "error must name the case and the generated Tag field: {msg}"
     );
 }
 

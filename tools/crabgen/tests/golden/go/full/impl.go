@@ -21,7 +21,7 @@ func (App) EchoEverything(e gen.Everything) (gen.Everything, error) {
 
 // PickColor handles crab:full/kitchen@0.1.0#pick-color.
 // A non-nil error is a function-level failure (status-1 reply).
-func (App) PickColor(c_ gen.Color) (gen.Color, error) {
+func (App) PickColor(c gen.Color) (gen.Color, error) {
 	return 0, fmt.Errorf("unimplemented: pick-color")
 }
 
@@ -53,6 +53,12 @@ func (App) MaybeList(xs *[]uint16) ([]*bool, error) {
 // A non-nil error is a function-level failure (status-1 reply).
 func (App) NoResult(x uint32) error {
 	return fmt.Errorf("unimplemented: no-result")
+}
+
+// Retry handles crab:full/kitchen@0.1.0#retry.
+// A non-nil error is a function-level failure (status-1 reply).
+func (App) Retry(prev *gen.Result[uint32, gen.Color]) (gen.Result[uint32, gen.Color], error) {
+	return gen.Result[uint32, gen.Color]{}, fmt.Errorf("unimplemented: retry")
 }
 
 func init() { gen.SetImpl(App{}) }
