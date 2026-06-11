@@ -104,7 +104,7 @@ for (const name of ["crab_alloc", "crab_schema", "crab_invoke", "memory"]) {
 }
 
 function invoke(name, argBytes) {
-  const nameBytes = utf8.encode(name);
+  const nameBytes = typeof name === "string" ? utf8.encode(name) : name;
   const namePtr = instance.exports.crab_alloc(nameBytes.length) >>> 0;
   mem().set(nameBytes, namePtr);
   const argPtr = instance.exports.crab_alloc(Math.max(argBytes.length, 1)) >>> 0;
@@ -124,6 +124,15 @@ function invoke(name, argBytes) {
     reply[1] === wantBytes.length &&
     Buffer.from(reply.slice(2)).toString() === want;
   if (!ok) fail("crab_invoke unknown", Buffer.from(reply).toString("hex"));
+}
+
+// Invalid-UTF-8 name bytes => status 1 + "invalid function name" (the name
+// is host-provided; the guest validates before decoding it).
+{
+  const reply = invoke(new Uint8Array([0xff, 0xfe]), new Uint8Array(0));
+  const want = "invalid function name";
+  const got = reply[0] === 1 ? Buffer.from(reply.slice(2)).toString() : "(status 0)";
+  if (got !== want) fail("crab_invoke bad name", got);
 }
 
 // Registered ping handler: u32(7) in => status 0, u32(8) out.

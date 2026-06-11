@@ -689,14 +689,20 @@ export function crab_invoke(
   argLen: i32
 ): usize {
   // Copy the name and args out of the host-written buffers, then unpin them
-  // (warm reactors would otherwise leak one pin per call).
+  // (warm reactors would otherwise leak one pin per call). The name is
+  // host-provided bytes: validate before decoding rather than handing
+  // unvalidated bytes to decodeUnsafe.
+  const nameOk = nameLen <= 0 || utf8Valid(namePtr, nameLen);
   const name =
-    nameLen > 0 ? String.UTF8.decodeUnsafe(namePtr, <usize>nameLen) : "";
+    nameOk && nameLen > 0
+      ? String.UTF8.decodeUnsafe(namePtr, <usize>nameLen)
+      : "";
   const args = new Uint8Array(argLen > 0 ? argLen : 0);
   if (argLen > 0) memory.copy(args.dataStart, argPtr, <usize>argLen);
   unpinAlloc(namePtr);
   unpinAlloc(argPtr);
 
+  if (!nameOk) return replyErr("invalid function name");
   if (!handlers.has(name)) return replyErr("unknown function: " + name);
   const h = handlers.get(name);
   const r = h(new Decoder(args));

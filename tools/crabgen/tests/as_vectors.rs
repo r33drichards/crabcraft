@@ -268,7 +268,7 @@ fn gen_reenc(ty: &Value, expect: Option<&Value>, n: &mut u32, code: &mut String)
     let i = *n;
     *n += 1;
     let p = "  ";
-    let check = format!("if (d.err !== null) return d.err;");
+    let check = "if (d.err !== null) return d.err;";
     match kind(ty) {
         "bool" => {
             code.push_str(&format!("{p}const r{i} = d.bool(); {check}\n"));
@@ -547,23 +547,30 @@ fn refresh_gen_copies(templates: &Path, scratch: &Path) {
     assert!(copied >= 2, "expected runtime.ts + mesh.ts in {src:?}");
 }
 
+/// The exact assemblyscript version pinned in a directory's package.json.
+fn pinned_as_version(dir: &Path) -> String {
+    let path = dir.join("package.json");
+    let pkg: Value = serde_json::from_str(
+        &fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}")),
+    )
+    .unwrap_or_else(|e| panic!("parse {path:?}: {e}"));
+    pkg["devDependencies"]["assemblyscript"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{path:?} must pin assemblyscript in devDependencies"))
+        .to_string()
+}
+
 /// `npm ci` into testdata/as-runtime/node_modules unless the pinned
 /// assemblyscript version is already installed (node_modules is gitignored
 /// and cached between runs).
 fn ensure_node_modules(scratch: &Path) {
-    let pkg: Value = serde_json::from_str(
-        &fs::read_to_string(scratch.join("package.json")).expect("read package.json"),
-    )
-    .expect("parse package.json");
-    let pinned = pkg["devDependencies"]["assemblyscript"]
-        .as_str()
-        .expect("package.json must pin assemblyscript");
+    let pinned = pinned_as_version(scratch);
 
     let installed = scratch.join("node_modules/assemblyscript/package.json");
     let up_to_date = fs::read_to_string(&installed)
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .is_some_and(|v| v["version"].as_str() == Some(pinned));
+        .is_some_and(|v| v["version"].as_str() == Some(pinned.as_str()));
     if up_to_date {
         return;
     }
@@ -643,6 +650,15 @@ fn as_runtime_passes_wire_vectors() {
     let templates = manifest.join("templates/ts");
     let scratch = manifest.join("testdata/as-runtime");
     refresh_gen_copies(&templates, &scratch);
+
+    // The template and the conformance scratch project must pin the SAME
+    // assemblyscript version: a template bump that skips testdata would
+    // otherwise certify a toolchain nobody ships.
+    assert_eq!(
+        pinned_as_version(&templates),
+        pinned_as_version(&scratch),
+        "templates/ts and testdata/as-runtime pin different assemblyscript versions"
+    );
 
     let (_, vectors) = load_vectors(manifest);
     fs::write(
