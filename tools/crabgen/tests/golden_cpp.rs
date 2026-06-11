@@ -515,18 +515,22 @@ world clash {
 
 #[test]
 fn cpp_keyword_param_project_compiles() {
-    // Params/fields hitting C++ keywords get a trailing underscore; the
-    // generated project must actually compile.
+    // Params/fields hitting C++ keywords get a trailing underscore, and a
+    // type ALIAS (absent from full.wit) gets a `using` + delegating codec
+    // helpers; the generated project must actually compile.
     let tmp = tempfile::tempdir().unwrap();
     let wit = r#"package crab:kw@0.1.0;
 
 interface api {
+  type ids = list<u32>;
+
   record opts {
     new: bool,
     delete: option<string>,
   }
 
   configure: func(template: opts, class: u32) -> result<string, string>;
+  lookup: func(xs: ids) -> ids;
 }
 
 world kw {
