@@ -10,6 +10,7 @@ use std::path::Path;
 
 use anyhow::{bail, Result};
 
+use crate::backend_go::GoBackend;
 use crate::ir::Module;
 
 /// Invariant: every `dir` passed in is `<repo_root>/guest/<name>` — backends
@@ -32,8 +33,9 @@ pub fn backend_for(lang: &str) -> Result<Box<dyn Backend>> {
     match lang {
         // placeholder lane used by crabgen's own tests
         "test" => Ok(Box::new(TestBackend)),
-        // real lanes land in later phases (go → rust → cpp → ts)
-        "rust" | "go" | "cpp" | "ts" => bail!("no backend for lang {lang} yet"),
+        "go" => Ok(Box::new(GoBackend)),
+        // remaining lanes land in later phases (rust → cpp → ts)
+        "rust" | "cpp" | "ts" => bail!("no backend for lang {lang} yet"),
         other => bail!("unknown lang `{other}` (expected one of: rust, go, cpp, ts)"),
     }
 }

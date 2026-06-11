@@ -574,11 +574,15 @@ func isScalarKind(kind string) bool {
 func loadVectors(t *testing.T) []vector {
 	path := os.Getenv("CRAB_VECTORS")
 	if path == "" {
-		t.Fatal("CRAB_VECTORS not set: must point at wit/vectors.json")
+		// Generated projects live at <repo>/guest/<name> and this test runs
+		// with cwd = gen/, so the repo's shared vectors are three levels up
+		// (../../wit/vectors.json relative to the project root). Set
+		// CRAB_VECTORS to run from anywhere else.
+		path = "../../../wit/vectors.json"
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("reading CRAB_VECTORS: %v", err)
+		t.Fatalf("reading vectors (set CRAB_VECTORS to override the path): %v", err)
 	}
 	var vecs []vector
 	if err := json.Unmarshal(data, &vecs); err != nil {

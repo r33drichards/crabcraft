@@ -165,7 +165,7 @@ fn discover_errors_on_multiple_wit_files() {
 #[test]
 fn check_passes_when_manifest_matches_wit() {
     let tmp = make_repo();
-    add_project(tmp.path(), "x", "go", VALID_WIT);
+    add_project(tmp.path(), "x", "rust", VALID_WIT);
 
     let out = crabgen(tmp.path(), &["check"]);
     assert!(
@@ -178,7 +178,7 @@ fn check_passes_when_manifest_matches_wit() {
 #[test]
 fn check_fails_listing_stale_project_and_suggests_regen() {
     let tmp = make_repo();
-    let dir = add_project(tmp.path(), "x", "go", VALID_WIT);
+    let dir = add_project(tmp.path(), "x", "rust", VALID_WIT);
     // mutate the WIT after the MANIFEST was written
     fs::write(
         dir.join("x.wit"),
@@ -349,12 +349,12 @@ fn regen_all_regenerates_every_project() {
 #[test]
 fn regen_errors_for_langs_without_backends() {
     let tmp = make_repo();
-    add_project(tmp.path(), "x", "go", VALID_WIT);
+    add_project(tmp.path(), "x", "rust", VALID_WIT);
 
     let out = crabgen(tmp.path(), &["regen", "guest/x"]);
     assert!(!out.status.success());
     assert!(
-        all_output(&out).contains("no backend for lang go yet"),
+        all_output(&out).contains("no backend for lang rust yet"),
         "{}",
         all_output(&out)
     );
@@ -412,10 +412,10 @@ fn new_scaffolds_a_working_project() {
 fn new_cleans_up_after_itself_when_backend_is_missing() {
     let tmp = make_repo();
 
-    let out = crabgen(tmp.path(), &["new", "doomed", "--lang", "go"]);
+    let out = crabgen(tmp.path(), &["new", "doomed", "--lang", "rust"]);
     assert!(!out.status.success());
     assert!(
-        all_output(&out).contains("no backend for lang go yet"),
+        all_output(&out).contains("no backend for lang rust yet"),
         "{}",
         all_output(&out)
     );
