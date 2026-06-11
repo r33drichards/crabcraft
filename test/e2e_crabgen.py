@@ -390,12 +390,15 @@ def run_lane(lane):
         with open(wasm_out, "rb") as f:
             prior_wasm = f.read()
     # `new --lang rust` appends the project crate to the root workspace
-    # members; without restoring this, a failed run leaves a dangling entry
-    # that breaks every later cargo invocation. Snapshot/restore is
-    # lane-agnostic and harmless for lanes that never touch it.
-    cargo_toml = os.path.join(ROOT, "Cargo.toml")
-    with open(cargo_toml) as f:
-        prior_cargo_toml = f.read()
+    # members, and the lane's cargo builds then record it in Cargo.lock —
+    # without restoring both, a run leaves a dangling members entry (breaks
+    # every later cargo invocation) or lockfile churn. Snapshot/restore is
+    # lane-agnostic and harmless for lanes that never touch them.
+    snapshots = {}
+    for fname in ("Cargo.toml", "Cargo.lock"):
+        path = os.path.join(ROOT, fname)
+        with open(path) as f:
+            snapshots[path] = f.read()
     try:
         case_a(lane, name, proj, wasm_out)
         case_b(lane, name, proj, wasm_out)
@@ -406,8 +409,9 @@ def run_lane(lane):
                 f.write(prior_wasm)
         elif os.path.exists(wasm_out):
             os.remove(wasm_out)
-        with open(cargo_toml, "w") as f:
-            f.write(prior_cargo_toml)
+        for path, content in snapshots.items():
+            with open(path, "w") as f:
+                f.write(content)
         cleanup = LANE[lane].get("cleanup")
         if cleanup:
             cleanup(proj, name)

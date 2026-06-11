@@ -225,7 +225,11 @@ fn rust_missing_impls_reports_typed_signatures() {
     fs::write(dir.join("src/app.rs"), "pub struct App;\n").unwrap();
     let backend = backend_for("rust").unwrap();
     let missing = backend.missing_impls(&module, &dir).unwrap();
-    assert_eq!(missing.len(), 8, "full.wit exports 8 functions: {missing:#?}");
+    assert_eq!(
+        missing.len(),
+        8,
+        "full.wit exports 8 functions: {missing:#?}"
+    );
     let all = missing.join("\n");
     assert!(
         all.contains(
@@ -415,16 +419,38 @@ world meshy {
 fn rust_regen_with_imports_demands_mesh_feature() {
     // generate() must refuse to emit mesh wrappers when the scaffolded
     // Cargo.toml (written before the WIT gained imports) lacks the crab-sdk
-    // `mesh` feature — emitted code wouldn't compile.
+    // `mesh` feature — emitted code wouldn't compile. The Cargo.toml under
+    // test is the REAL scaffolded one — whose header comment mentions
+    // "mesh", so a naive whole-file substring guard never fires on it:
+    // scaffold against an import-free WIT, then grow imports and regen.
     let tmp = tempfile::tempdir().unwrap();
+    fs::write(tmp.path().join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
     let dir = tmp.path().join("guest/late");
     fs::create_dir_all(dir.join("gen")).unwrap();
-    fs::write(
-        dir.join("Cargo.toml"),
-        "[package]\nname = \"late\"\n\n[dependencies]\ncrab-sdk = { path = \"../crab-sdk\" }\n",
-    )
-    .unwrap();
-    let wit_src = r#"package crab:late@0.1.0;
+    let v1 = r#"package crab:late@0.1.0;
+
+interface api {
+  noop: func();
+}
+
+world late {
+  export api;
+}
+"#;
+    fs::write(dir.join("late.wit"), v1).unwrap();
+    let module = wit::load(&dir.join("late.wit")).unwrap();
+    let backend = backend_for("rust").unwrap();
+    backend.generate(&module, &dir).expect("generate v1");
+    backend.scaffold(&module, &dir).expect("scaffold v1");
+    let cargo = fs::read_to_string(dir.join("Cargo.toml")).unwrap();
+    assert!(
+        cargo.contains("crab-sdk = { path = \"../crab-sdk\" }"),
+        "an import-free scaffold must not enable the mesh feature (note the \
+         header comment DOES mention it — that's the trap):\n{cargo}"
+    );
+
+    // the WIT gains an import: regen must bail, naming the fix
+    let v2 = r#"package crab:late@0.1.0;
 
 interface api {
   noop: func();
@@ -439,9 +465,8 @@ world late {
   export api;
 }
 "#;
-    fs::write(dir.join("late.wit"), wit_src).unwrap();
+    fs::write(dir.join("late.wit"), v2).unwrap();
     let module = wit::load(&dir.join("late.wit")).unwrap();
-    let backend = backend_for("rust").unwrap();
     let msg = format!(
         "{:#}",
         backend
@@ -449,7 +474,18 @@ world late {
             .expect_err("imports without the mesh feature must fail generate()")
     );
     assert!(
-        msg.contains("mesh"),
+        msg.contains("features = [\"mesh\"]"),
         "error must say how to enable the mesh feature: {msg}"
     );
+
+    // and once the user makes the exact edit the error names, regen succeeds
+    let fixed = fs::read_to_string(dir.join("Cargo.toml")).unwrap().replace(
+        "crab-sdk = { path = \"../crab-sdk\" }",
+        "crab-sdk = { path = \"../crab-sdk\", features = [\"mesh\"] }",
+    );
+    assert!(fixed.contains("features = [\"mesh\"]"), "test edit applied");
+    fs::write(dir.join("Cargo.toml"), fixed).unwrap();
+    backend
+        .generate(&module, &dir)
+        .expect("generate succeeds once the mesh feature is enabled");
 }

@@ -12,8 +12,10 @@
 // the runtime replies status 1 with the message.
 
 // The bindings are a surface API: the app may use any subset of the
-// generated types/consts/wrappers.
+// generated types/consts/wrappers — and generated code is exempt from
+// style lints.
 #![allow(dead_code)]
+#![allow(clippy::all)]
 
 use crab_sdk::{Registry, Type, Value};
 
