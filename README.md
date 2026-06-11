@@ -22,11 +22,17 @@ Workloads can call each other by name through the mesh (`crabcraft.call`).
 | Lane | Source | Artifact | Kind |
 |---|---|---|---|
 | Rust | `guest/hello` (+ `guest/crab-sdk`) | `hello.wasm` 88 KB | reactor (typed WIT) |
-| Go | `guest/hello-go` (TinyGo) | `hello-go.wasm` 15 KB | reactor (typed WIT) |
+| Go | `guest/hello-go` (TinyGo) | `hello-go.wasm` 97 KB | reactor (typed WIT) |
 | C + SQLite | `guest/sqlite-c` | `sqlite.wasm` 740 KB | reactor; db persists on the volume |
 | JS | `guest/hello-js` (QuickJS, SIMD-free) | `hello-js.wasm` 0.6 MB | command (JSON stdin/stdout) |
 | Rust mesh | `guest/caller` | `caller.wasm` 90 KB | reactor; calls other workloads |
 | Python | `guest/hello-py` | documented; RustPython passes but 26 MB > floppy | command |
+| C++ | crabgen `--lang cpp` (zig c++) | scaffolded per project | reactor (typed WIT) |
+| TypeScript | crabgen `--lang ts` (AssemblyScript) | scaffolded per project | reactor (typed WIT) |
+
+**Write your own guest:** [docs/GUESTS.md](docs/GUESTS.md) — `crabgen`
+scaffolds a complete guest from a WIT file in Rust, Go, C++, or TypeScript
+(`cargo run -p crabgen -- new my-mod --lang go`); you write one impl file.
 
 ## In-game quickstart
 

@@ -1,4 +1,11 @@
-# Writing a crabcraft guest module (Rust)
+# crab-sdk under the hood (Rust)
+
+> **Start with [GUESTS.md](GUESTS.md) instead.** `crabgen new <name> --lang
+> rust` scaffolds everything below — the schema embed, the registry setup,
+> the `export_abi!` invocation, plus typed structs and a trait to implement —
+> and `crabgen regen` keeps it in sync with your WIT. This doc describes the
+> layer the generated `src/gen/` sits on: read it to understand what the
+> generated code does, or to hand-roll a guest without crabgen.
 
 A module is a `wasm32-wasip1` **reactor** cdylib that depends on `crab-sdk`.
 The SDK implements the WIRE.md codec (section 1) and emits the three ABI
