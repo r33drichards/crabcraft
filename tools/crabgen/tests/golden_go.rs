@@ -250,7 +250,12 @@ world solo {
     backend.scaffold(&module, &dir).unwrap();
     fs::write(dir.join("gen/schema.json"), &module.schema_json).unwrap();
 
-    for absent in ["gen/mesh.go", "gen/mesh_wasm.go", "gen/imports.go"] {
+    for absent in [
+        "gen/mesh.go",
+        "gen/mesh_wasm.go",
+        "gen/imports.go",
+        "gen/mesh_test.go",
+    ] {
         assert!(
             !dir.join(absent).exists(),
             "{absent} must only be emitted when the world has imports"
@@ -260,6 +265,16 @@ world solo {
     let mut build = go_cmd("go");
     build.args(["build", "./..."]);
     run_in(&dir, build, "go build (no-imports project)");
+
+    // The README tells users to run `go test ./...` — it must build and pass
+    // even without the mesh files (mesh tests ship only with mesh.go).
+    let vectors = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../wit/vectors.json")
+        .canonicalize()
+        .expect("wit/vectors.json must exist");
+    let mut test = go_cmd("go");
+    test.args(["test", "./..."]).env("CRAB_VECTORS", &vectors);
+    run_in(&dir, test, "go test (no-imports project)");
     let mut fmt = go_cmd("gofmt");
     fmt.args(["-l", "."]);
     let unformatted = run_in(&dir, fmt, "gofmt -l (no-imports project)");
