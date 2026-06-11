@@ -51,10 +51,9 @@
 //! of value/err — build with `ResX.ok(v)` / `ResX.fail(msg)`:
 //! - no WIT result        → ResVoid;  non-null .err = status-1 reply
 //! - plain value T        → Res<T>;   non-null .err = status-1 reply
-//! - result<T, string> or result with absent err payload
-//!                        → Res<T> (ResVoid when the ok side is absent); a
-//!                          non-null .err is the WIRE result ERR CASE
-//!                          (status stays 0)
+//! - result<T, string> or result with absent err payload → Res<T> (ResVoid
+//!   when the ok side is absent); a non-null .err is the WIRE result ERR
+//!   CASE (status stays 0)
 //! - result<T, E> (other E) → Res<Result<TokT><TokE>>; .err = status-1
 //!
 //! Name casing: WIT kebab-case → PascalCase for types / generated shape
@@ -474,6 +473,10 @@ impl Cx {
 // ---------------------------------------------------------------------------
 
 /// A generated shared-shape class (emitted once per distinct shape).
+/// PartialEq backs the collision guard in collect_shapes: two DIFFERENT
+/// shapes landing on one class name must fail generate(), never silently
+/// merge.
+#[derive(PartialEq)]
 enum Shape {
     /// `Option<Tok>`: box for an option whose payload AS cannot null.
     OptionBox(Ty),
@@ -483,6 +486,34 @@ enum Shape {
     ResultVal(Option<Ty>, Option<Ty>),
     /// `Res<Tok>` / `ResVoid`: the impl/mesh function-return wrapper.
     Res(Option<Ty>),
+}
+
+/// Shared-shape accumulator: first-need order, one class per name, and a
+/// hard error when two DIFFERENT shapes land on the same generated name
+/// (token mangling is not injective: tuple<a-b, c> and tuple<a, b-c> both
+/// spell Tuple2ABC — a silent merge would emit one class with the wrong
+/// fields for one of them).
+#[derive(Default)]
+struct Shapes {
+    list: Vec<(String, Shape)>,
+    index: HashMap<String, usize>,
+}
+
+impl Shapes {
+    fn add(&mut self, name: String, shape: Shape) -> Result<()> {
+        if let Some(&i) = self.index.get(&name) {
+            if self.list[i].1 != shape {
+                bail!(
+                    "distinct WIT types both map to generated class `{name}`; rename one \
+                     (the shape-class name mangling is not unique here)"
+                );
+            }
+            return Ok(());
+        }
+        self.index.insert(name.clone(), self.list.len());
+        self.list.push((name, shape));
+        Ok(())
+    }
 }
 
 struct Gen<'a> {
@@ -567,56 +598,18 @@ impl<'a> Gen<'a> {
         ))
     }
 
-    /// PascalCase token naming a type shape (shared-shape class names are
-    /// built from these): Option<Tok>, Tuple<N><Toks>, Result<Tok><Tok>
-    /// (absent sides = Void), Named → its Pascal name.
-    fn ty_token(&self, ty: &Ty) -> Result<String> {
-        Ok(match ty {
-            Ty::List(t) => format!("List{}", self.ty_token(t)?),
-            Ty::Option(t) => format!("Option{}", self.ty_token(t)?),
-            Ty::Tuple(ts) => {
-                let mut s = format!("Tuple{}", ts.len());
-                for t in ts {
-                    s.push_str(&self.ty_token(t)?);
-                }
-                s
-            }
-            Ty::Result(ok, errt) => {
-                let side = |t: &Option<Box<Ty>>| -> Result<String> {
-                    Ok(match t {
-                        Some(t) => self.ty_token(t)?,
-                        None => "Void".to_string(),
-                    })
-                };
-                format!("Result{}{}", side(ok)?, side(errt)?)
-            }
-            Ty::Named(n) => as_pascal(n),
-            Ty::Record(_) | Ty::Variant(_) | Ty::Enum(_) | Ty::Flags(_) => {
-                bail!("internal error: anonymous {ty:?} cannot appear in value position (WIT names these)")
-            }
-            _ => scalar(ty)
-                .map(|(m, _)| {
-                    let mut c = m.chars();
-                    c.next().map_or(String::new(), |f| {
-                        f.to_ascii_uppercase().to_string() + c.as_str()
-                    })
-                })
-                .ok_or_else(|| anyhow!("unmapped type {ty:?}"))?,
-        })
-    }
-
     /// AS type expression for a value-position type.
     fn as_ty(&self, ty: &'a Ty) -> Result<String> {
         Ok(match ty {
             Ty::List(t) => format!("Array<{}>", self.as_ty(t)?),
             Ty::Option(t) => {
                 if self.needs_box(t)? {
-                    format!("{} | null", self.ty_token(ty)?)
+                    format!("{} | null", ty_token(ty)?)
                 } else {
                     format!("{} | null", self.as_ty(t)?)
                 }
             }
-            Ty::Tuple(_) | Ty::Result(..) => self.ty_token(ty)?,
+            Ty::Tuple(_) | Ty::Result(..) => ty_token(ty)?,
             Ty::Named(n) => as_pascal(n),
             Ty::Record(_) | Ty::Variant(_) | Ty::Enum(_) | Ty::Flags(_) => {
                 bail!("internal error: anonymous {ty:?} cannot appear in value position (WIT names these)")
@@ -646,7 +639,7 @@ impl<'a> Gen<'a> {
             Ty::String => "\"\"".to_string(),
             Ty::List(t) => format!("new Array<{}>()", self.as_ty(t)?),
             Ty::Option(_) => "null".to_string(),
-            Ty::Tuple(_) | Ty::Result(..) => format!("new {}()", self.ty_token(ty)?),
+            Ty::Tuple(_) | Ty::Result(..) => format!("new {}()", ty_token(ty)?),
             Ty::Named(_) => {
                 let (name, resolved) = self.resolve_named(ty)?;
                 let name = name.expect("Named resolves through names");
@@ -697,97 +690,79 @@ impl<'a> Gen<'a> {
     fn res_name(&self, f: &'a Func) -> Result<String> {
         Ok(match self.res_value(f)? {
             None => "ResVoid".to_string(),
-            Some(t) => format!("Res{}", self.ty_token(t)?),
+            Some(t) => format!("Res{}", ty_token(t)?),
         })
     }
 
     // -- shared shape collection -------------------------------------------------
 
     fn collect_shapes(&mut self) -> Result<()> {
-        let mut seen: HashSet<String> = HashSet::new();
-        let mut shapes: Vec<(String, Shape)> = Vec::new();
+        let mut shapes = Shapes::default();
         // walk in deterministic order: per iface (exports then imports),
         // types in declaration order, then funcs (params, then result)
         let ifaces: Vec<&Iface> = self.m.exports.iter().chain(&self.m.imports).collect();
         for iface in &ifaces {
             for t in &iface.types {
-                self.scan_ty(&t.ty, &mut seen, &mut shapes)?;
+                self.scan_ty(&t.ty, &mut shapes)?;
             }
         }
         for iface in &ifaces {
             for f in &iface.funcs {
                 for (_, t) in &f.params {
-                    self.scan_ty(t, &mut seen, &mut shapes)?;
+                    self.scan_ty(t, &mut shapes)?;
                 }
                 match self.classify(f)? {
                     Ret::None => {}
-                    Ret::Plain(t) | Ret::ResTyped(t) => self.scan_ty(t, &mut seen, &mut shapes)?,
+                    Ret::Plain(t) | Ret::ResTyped(t) => self.scan_ty(t, &mut shapes)?,
                     Ret::ResStr { ok, .. } => {
                         if let Some(t) = ok {
-                            self.scan_ty(t, &mut seen, &mut shapes)?;
+                            self.scan_ty(t, &mut shapes)?;
                         }
                     }
                 }
-                let name = self.res_name(f)?;
-                if seen.insert(name.clone()) {
-                    shapes.push((name, Shape::Res(self.res_value(f)?.cloned())));
-                }
+                shapes.add(self.res_name(f)?, Shape::Res(self.res_value(f)?.cloned()))?;
             }
         }
-        self.shapes = shapes;
+        self.shapes = shapes.list;
         Ok(())
     }
 
-    fn scan_ty(
-        &self,
-        ty: &'a Ty,
-        seen: &mut HashSet<String>,
-        shapes: &mut Vec<(String, Shape)>,
-    ) -> Result<()> {
+    fn scan_ty(&self, ty: &'a Ty, shapes: &mut Shapes) -> Result<()> {
         match ty {
-            Ty::List(t) => self.scan_ty(t, seen, shapes)?,
+            Ty::List(t) => self.scan_ty(t, shapes)?,
             Ty::Option(t) => {
                 if self.needs_box(t)? {
-                    let name = self.ty_token(ty)?;
-                    if seen.insert(name.clone()) {
-                        shapes.push((name, Shape::OptionBox((**t).clone())));
-                    }
+                    shapes.add(ty_token(ty)?, Shape::OptionBox((**t).clone()))?;
                 }
-                self.scan_ty(t, seen, shapes)?;
+                self.scan_ty(t, shapes)?;
             }
             Ty::Tuple(ts) => {
-                let name = self.ty_token(ty)?;
-                if seen.insert(name.clone()) {
-                    shapes.push((name, Shape::Tuple(ts.clone())));
-                }
+                shapes.add(ty_token(ty)?, Shape::Tuple(ts.clone()))?;
                 for t in ts {
-                    self.scan_ty(t, seen, shapes)?;
+                    self.scan_ty(t, shapes)?;
                 }
             }
             Ty::Result(ok, errt) => {
-                let name = self.ty_token(ty)?;
-                if seen.insert(name.clone()) {
-                    shapes.push((
-                        name,
-                        Shape::ResultVal(ok.as_deref().cloned(), errt.as_deref().cloned()),
-                    ));
-                }
+                shapes.add(
+                    ty_token(ty)?,
+                    Shape::ResultVal(ok.as_deref().cloned(), errt.as_deref().cloned()),
+                )?;
                 if let Some(t) = ok.as_deref() {
-                    self.scan_ty(t, seen, shapes)?;
+                    self.scan_ty(t, shapes)?;
                 }
                 if let Some(t) = errt.as_deref() {
-                    self.scan_ty(t, seen, shapes)?;
+                    self.scan_ty(t, shapes)?;
                 }
             }
             Ty::Record(fs) => {
                 for (_, t) in fs {
-                    self.scan_ty(t, seen, shapes)?;
+                    self.scan_ty(t, shapes)?;
                 }
             }
             Ty::Variant(cs) => {
                 for (_, t) in cs {
                     if let Some(t) = t {
-                        self.scan_ty(t, seen, shapes)?;
+                        self.scan_ty(t, shapes)?;
                     }
                 }
             }
@@ -1049,7 +1024,7 @@ impl<'a> Gen<'a> {
                 ));
                 self.emit_decode(w, cx, t, &x)?;
                 if self.needs_box(t)? {
-                    w.line(format!("{dest} = new {}({x});", self.ty_token(ty)?));
+                    w.line(format!("{dest} = new {}({x});", ty_token(ty)?));
                 } else {
                     w.line(format!("{dest} = {x};"));
                 }
@@ -1731,14 +1706,23 @@ impl<'a> Gen<'a> {
         };
         w.line(res_note);
         w.open(format!("{} {{", self.mesh_wrapper_sig(iface, f)?));
+        // fail_stmt references `d`, which is only declared AFTER the param
+        // encodes below — safe: emit_encode never emits fail_stmt (Sink
+        // errors are sticky and checked once), only emit_decode does.
         let mut cx = Cx::new(format!("return {res}.fail(d.err!);"));
-        w.line("const s = new Sink();");
-        for (n, t) in &f.params {
-            self.emit_encode(w, &mut cx, t, &as_param(n))?;
-        }
-        w.line(format!("if (s.err !== null) return {res}.fail(s.err!);"));
+        let params_expr = if f.params.is_empty() {
+            // no params: skip the Sink (and its dead err check) entirely
+            "new Uint8Array(0)".to_string()
+        } else {
+            w.line("const s = new Sink();");
+            for (n, t) in &f.params {
+                self.emit_encode(w, &mut cx, t, &as_param(n))?;
+            }
+            w.line(format!("if (s.err !== null) return {res}.fail(s.err!);"));
+            "s.bytes()".to_string()
+        };
         w.line(format!(
-            "const r = meshCall(workload, \"{addr}\", s.bytes());"
+            "const r = meshCall(workload, \"{addr}\", {params_expr});"
         ));
         w.line(format!("if (r.err !== null) return {res}.fail(r.err!);"));
         w.line("const d = new Decoder(r.bytes!);");
@@ -1842,13 +1826,13 @@ impl<'a> Gen<'a> {
             Ty::List(t) => self.sig_idents(t, out)?,
             Ty::Option(t) => {
                 if self.needs_box(t)? {
-                    out.insert(self.ty_token(ty)?);
+                    out.insert(ty_token(ty)?);
                 } else {
                     self.sig_idents(t, out)?;
                 }
             }
             Ty::Tuple(_) | Ty::Result(..) => {
-                out.insert(self.ty_token(ty)?);
+                out.insert(ty_token(ty)?);
             }
             Ty::Named(n) => {
                 out.insert(as_pascal(n));
@@ -1902,6 +1886,46 @@ impl<'a> Gen<'a> {
         }
         Ok(trim_final(&w.buf))
     }
+}
+
+/// PascalCase token naming a type shape (shared-shape class names are built
+/// from these): Option<Tok>, Tuple<N><Toks>, Result<Tok><Tok> (absent sides
+/// = Void), Named → its Pascal name. Tokens can collide (tuple<a-b, c> and
+/// tuple<a, b-c> both spell Tuple2ABC) — collect_shapes guards against two
+/// DIFFERENT shapes landing on one name.
+fn ty_token(ty: &Ty) -> Result<String> {
+    Ok(match ty {
+        Ty::List(t) => format!("List{}", ty_token(t)?),
+        Ty::Option(t) => format!("Option{}", ty_token(t)?),
+        Ty::Tuple(ts) => {
+            let mut s = format!("Tuple{}", ts.len());
+            for t in ts {
+                s.push_str(&ty_token(t)?);
+            }
+            s
+        }
+        Ty::Result(ok, errt) => {
+            let side = |t: &Option<Box<Ty>>| -> Result<String> {
+                Ok(match t {
+                    Some(t) => ty_token(t)?,
+                    None => "Void".to_string(),
+                })
+            };
+            format!("Result{}{}", side(ok)?, side(errt)?)
+        }
+        Ty::Named(n) => as_pascal(n),
+        Ty::Record(_) | Ty::Variant(_) | Ty::Enum(_) | Ty::Flags(_) => {
+            bail!("internal error: anonymous {ty:?} cannot appear in value position (WIT names these)")
+        }
+        _ => scalar(ty)
+            .map(|(m, _)| {
+                let mut c = m.chars();
+                c.next().map_or(String::new(), |f| {
+                    f.to_ascii_uppercase().to_string() + c.as_str()
+                })
+            })
+            .ok_or_else(|| anyhow!("unmapped type {ty:?}"))?,
+    })
 }
 
 /// A type whose AS mapping is a value type (not a reference): numbers, bool,

@@ -752,9 +752,7 @@ export function telemetryReport(workload: string, s_: Sample): ResVoid {
 // `workload` through the host mesh. The returned .err covers transport
 // failures and remote status-1 failures.
 export function telemetryPing(workload: string): ResBool {
-  const s = new Sink();
-  if (s.err !== null) return ResBool.fail(s.err!);
-  const r = meshCall(workload, "crab:full/telemetry@0.1.0#ping", s.bytes());
+  const r = meshCall(workload, "crab:full/telemetry@0.1.0#ping", new Uint8Array(0));
   if (r.err !== null) return ResBool.fail(r.err!);
   const d = new Decoder(r.bytes!);
   let x0: bool = false;

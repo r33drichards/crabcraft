@@ -275,10 +275,11 @@ fn assert_simd_free(disasm: &str, wasm: &Path) {
         }
         let t = line.trim_start();
         if let Some((addr, rest)) = t.split_once(':') {
-            if !addr.is_empty() && addr.chars().all(|c| c.is_ascii_hexdigit()) {
-                if rest.trim_start().starts_with("fd ") {
-                    panic!("0xfd-prefixed (SIMD) opcode in {wasm:?}: {line}");
-                }
+            if !addr.is_empty()
+                && addr.chars().all(|c| c.is_ascii_hexdigit())
+                && rest.trim_start().starts_with("fd ")
+            {
+                panic!("0xfd-prefixed (SIMD) opcode in {wasm:?}: {line}");
             }
         }
     }
@@ -526,6 +527,51 @@ world boxclash {
     assert!(
         msg.contains("OptionBool"),
         "error must name the colliding identifier: {msg}"
+    );
+}
+
+#[test]
+fn as_shape_token_ambiguity_is_an_error() {
+    // The shape-class name mangling is not injective: tuple<a-b, c> and
+    // tuple<a, b-c> both spell Tuple2ABC. Two DIFFERENT shapes landing on
+    // one generated class name must fail generate(), never silently merge
+    // (one of the two would get a class with the wrong fields).
+    let tmp = tempfile::tempdir().unwrap();
+    let wit = r#"package crab:tokclash@0.1.0;
+
+interface api {
+  record a-b {
+    x: u32,
+  }
+
+  record c {
+    x: u32,
+  }
+
+  record a {
+    x: u32,
+  }
+
+  record b-c {
+    x: u32,
+  }
+
+  first: func(v: tuple<a-b, c>) -> u32;
+  second: func(v: tuple<a, b-c>) -> u32;
+}
+
+world tokclash {
+  export api;
+}
+"#;
+    let (_module, _dir, res) = gen_inline(tmp.path(), "tokclash", wit);
+    let msg = format!(
+        "{:#}",
+        res.expect_err("two distinct tuple shapes named Tuple2ABC must fail generate()")
+    );
+    assert!(
+        msg.contains("Tuple2ABC") && msg.contains("rename one"),
+        "error must name the ambiguous generated class: {msg}"
     );
 }
 

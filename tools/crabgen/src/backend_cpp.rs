@@ -33,9 +33,9 @@
 //! Ret classification): every impl function returns `crab::Res<V>` where
 //! - no WIT result        → V = std::monostate; non-empty .err = status-1
 //! - plain value T        → V = T;              non-empty .err = status-1
-//! - result<T, string> or result with absent err payload
-//!                        → V = T (or std::monostate); a non-empty .err is
-//!                          the WIRE result ERR CASE (status stays 0)
+//! - result<T, string> or result with absent err payload → V = T (or
+//!   std::monostate); a non-empty .err is the WIRE result ERR CASE
+//!   (status stays 0)
 //! - result<T, E> (other E) → V = gen::Result<T, E>; non-empty .err = status-1
 //!
 //! Name casing: WIT kebab-case → PascalCase for types / variant case structs
@@ -1067,9 +1067,7 @@ impl<'a> Gen<'a> {
                 w.line(format!(
                     "// alternative i = WIT case i ({case_list}); construct payload cases"
                 ));
-                w.line(format!(
-                    "// from their structs, empty cases with std::in_place_index<i>, and"
-                ));
+                w.line("// from their structs, empty cases with std::in_place_index<i>, and");
                 w.line("// read with v.index() + std::get<i>(v).");
                 w.line(format!("using {p} = std::variant<{alts}>;"));
                 w.line("");
