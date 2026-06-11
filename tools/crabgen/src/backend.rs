@@ -20,9 +20,11 @@ pub trait Backend {
     fn lang(&self) -> &'static str;
     /// Extension of the hand-written impl file (`impl.<ext>`).
     fn impl_ext(&self) -> &'static str;
-    /// Emit gen/ contents beyond schema.json + MANIFEST (the driver writes those).
+    /// Emit gen/ contents beyond schema.json + MANIFEST (the driver writes
+    /// those), plus the project README (WIT-derived, so regenerated — at the
+    /// project root, not gen/).
     fn generate(&self, m: &Module, dir: &Path) -> Result<()>;
-    /// Impl stub, build.sh, README, language files — written ONLY if absent.
+    /// Impl stub, build.sh, go.mod-style language files — written ONLY if absent.
     fn scaffold(&self, m: &Module, dir: &Path) -> Result<()>;
     /// Typed signatures of exported functions not found in the impl file.
     /// Printed by the driver; the impl file is NEVER edited by crabgen.

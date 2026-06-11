@@ -301,6 +301,45 @@ fn gen_inline(
 }
 
 #[test]
+fn go_readme_refreshes_on_regen_after_wit_swap() {
+    // The canonical flow is `new` (starter WIT) -> replace the WIT -> regen.
+    // README.md quotes the export instance, so it must be REGENERATED on
+    // every generate(), not written once — otherwise every project's README
+    // names the starter interface forever.
+    let v1 = r#"package crab:swap@0.1.0;
+
+interface api {
+  greet: func(name: string) -> string;
+}
+
+world swap {
+  export api;
+}
+"#;
+    let tmp = tempfile::tempdir().unwrap();
+    let (module, dir, res) = gen_inline(tmp.path(), "swap", v1);
+    res.unwrap();
+    let backend = backend_for("go").unwrap();
+    backend.scaffold(&module, &dir).unwrap();
+    let readme = fs::read_to_string(dir.join("README.md")).unwrap();
+    assert!(
+        readme.contains("crab:swap/api@0.1.0"),
+        "README names the initial instance:\n{readme}"
+    );
+
+    // swap the WIT (new interface name => new instance string) and regen
+    let v2 = v1.replace("api", "greeter");
+    fs::write(dir.join("swap.wit"), &v2).unwrap();
+    let module = wit::load(&dir.join("swap.wit")).unwrap();
+    backend.generate(&module, &dir).unwrap();
+    let readme = fs::read_to_string(dir.join("README.md")).unwrap();
+    assert!(
+        readme.contains("crab:swap/greeter@0.1.0") && !readme.contains("crab:swap/api@0.1.0"),
+        "README is stale after a WIT swap + regen:\n{readme}"
+    );
+}
+
+#[test]
 fn go_param_named_is_err_compiles() {
     // The mesh wrapper for a result-returning import declares `var isErr
     // bool` in the same scope as the function params, so a WIT param
