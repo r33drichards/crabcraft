@@ -383,7 +383,10 @@ func (d *Decoder) String() (string, error) {
 	return string(b), nil
 }
 
-// ListLen decodes uleb(count); the caller then decodes each element.
+// ListLen decodes uleb(count); the caller then decodes each element. The
+// count is attacker-controlled, so callers must clamp pre-allocation
+// (crab-sdk caps initial capacity at 4096) and let element decoding fail
+// naturally on short buffers.
 func (d *Decoder) ListLen() (int, error) {
 	v, err := d.Uleb(32)
 	return int(v), err
@@ -508,6 +511,12 @@ func crabSchema() uint32 {
 
 //go:wasmexport crab_invoke
 func crabInvoke(namePtr, nameLen, argPtr, argLen int32) uint32 {
+	// Unpin the host-written name/args buffers when this invoke returns:
+	// warm reactors would otherwise leak one pin per call. Safe because the
+	// name is copied into a string, the handler has finished by the time the
+	// deferred deletes run, and the reply lives in its own buffer.
+	defer delete(allocs, uintptr(uint32(namePtr)))
+	defer delete(allocs, uintptr(uint32(argPtr)))
 	name := string(unsafe.Slice((*byte)(unsafe.Pointer(uintptr(uint32(namePtr)))), int(nameLen)))
 	h, ok := handlers[name]
 	if !ok {

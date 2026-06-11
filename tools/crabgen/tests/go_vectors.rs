@@ -20,8 +20,16 @@ fn on_path(name: &str) -> bool {
 
 /// Copy every .go file from templates/go into the scratch module so the
 /// copies can never go stale (go.mod is the only file owned by testdata).
+/// Existing .go files are cleared first so deleted/renamed templates can't
+/// leave stale copies behind.
 fn refresh_copies(templates: &Path, scratch: &Path) -> Vec<PathBuf> {
     fs::create_dir_all(scratch).expect("create testdata/go-runtime");
+    for entry in fs::read_dir(scratch).expect("read testdata/go-runtime") {
+        let path = entry.expect("dir entry").path();
+        if path.extension().is_some_and(|e| e == "go") {
+            fs::remove_file(&path).unwrap_or_else(|e| panic!("remove stale {path:?}: {e}"));
+        }
+    }
     let mut copied = Vec::new();
     for entry in fs::read_dir(templates).expect("read templates/go") {
         let path = entry.expect("dir entry").path();

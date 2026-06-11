@@ -690,7 +690,7 @@ func TestUlebOverflowBits(t *testing.T) {
 	if _, err := d.U8(); err == nil {
 		t.Error("3-byte uleb for u8 must error (too long)")
 	}
-	// Non-canonical zero padding is accepted: 7 = ff... no — 0x87 0x00 is 7.
+	// Non-canonical zero padding is accepted: 0x87 0x00 decodes to 7.
 	d = NewDecoder(mustHex(t, "8700"))
 	if v, err := d.U8(); err != nil || v != 7 {
 		t.Errorf("non-canonical uleb 8700 = %d, %v; want 7", v, err)
@@ -815,6 +815,44 @@ func TestEmptyValues(t *testing.T) {
 	}
 	if got := EncodeListLen(nil, 0); fmt.Sprintf("%x", got) != "00" {
 		t.Errorf("empty list = %x, want 00", got)
+	}
+}
+
+func TestParseMeshReply(t *testing.T) {
+	// status 0: body returned verbatim.
+	body, err := parseMeshReply(mustHex(t, "0007"))
+	if err != nil || fmt.Sprintf("%x", body) != "07" {
+		t.Errorf("status-0 reply = %x, %v; want 07", body, err)
+	}
+	// status 0 with empty body: ok, empty result.
+	body, err = parseMeshReply(mustHex(t, "00"))
+	if err != nil || len(body) != 0 {
+		t.Errorf("status-0 empty reply = %x, %v; want empty", body, err)
+	}
+	// status 1: the decoded error string.
+	payload := append([]byte{1}, EncodeString(nil, "boom")...)
+	if _, err = parseMeshReply(payload); err == nil || err.Error() != "boom" {
+		t.Errorf("status-1 reply err = %v; want boom", err)
+	}
+	// status 1 with trailing bytes after the error string: malformed.
+	if _, err = parseMeshReply(append(payload, 0)); err == nil ||
+		!strings.Contains(err.Error(), "malformed error reply") {
+		t.Errorf("status-1 trailing bytes err = %v; want malformed", err)
+	}
+	// status 1 with an undecodable string: malformed.
+	if _, err = parseMeshReply(mustHex(t, "0105")); err == nil ||
+		!strings.Contains(err.Error(), "malformed error reply") {
+		t.Errorf("status-1 truncated string err = %v; want malformed", err)
+	}
+	// invalid status byte.
+	if _, err = parseMeshReply(mustHex(t, "02")); err == nil ||
+		!strings.Contains(err.Error(), "invalid reply status") {
+		t.Errorf("status-2 err = %v; want invalid reply status", err)
+	}
+	// empty payload.
+	if _, err = parseMeshReply(nil); err == nil ||
+		!strings.Contains(err.Error(), "empty reply") {
+		t.Errorf("empty payload err = %v; want empty reply", err)
 	}
 }
 

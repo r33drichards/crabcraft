@@ -29,8 +29,11 @@ func slicePtr(b []byte) unsafe.Pointer {
 }
 
 // readLenbuf reads a host-returned LENBUF ([u32 LE length][payload]) out of
-// linear memory.
+// linear memory; a null pointer reads as an empty payload.
 func readLenbuf(ptr uint32) []byte {
+	if ptr == 0 {
+		return nil
+	}
 	hdr := unsafe.Slice((*byte)(unsafe.Pointer(uintptr(ptr))), 4)
 	n := uint32(hdr[0]) | uint32(hdr[1])<<8 | uint32(hdr[2])<<16 | uint32(hdr[3])<<24
 	if n == 0 {
@@ -52,10 +55,17 @@ func MeshCall(workload, fn string, params []byte) ([]byte, error) {
 	ptr := meshHostCall(slicePtr(wl), uint32(len(wl)),
 		slicePtr(fnb), uint32(len(fnb)),
 		slicePtr(params), uint32(len(params)))
-	payload := readLenbuf(ptr)
 	// The host wrote the reply via crab_alloc: copy out what we need, then
 	// unpin so the buffer can be collected.
 	defer delete(allocs, uintptr(ptr))
+	return parseMeshReply(readLenbuf(ptr))
+}
+
+// parseMeshReply splits a [status][body] mesh reply: status 0 returns a copy
+// of the body (the encoded result value); status 1 decodes the body as the
+// error string, which must consume the body exactly; anything else is a
+// protocol error.
+func parseMeshReply(payload []byte) ([]byte, error) {
 	if len(payload) == 0 {
 		return nil, errors.New("mesh call: empty reply")
 	}
@@ -70,6 +80,9 @@ func MeshCall(workload, fn string, params []byte) ([]byte, error) {
 		msg, err := d.String()
 		if err != nil {
 			return nil, errors.New("mesh call: malformed error reply")
+		}
+		if d.Remaining() != 0 {
+			return nil, errors.New("mesh call: malformed error reply (trailing bytes)")
 		}
 		return nil, errors.New(msg)
 	}
