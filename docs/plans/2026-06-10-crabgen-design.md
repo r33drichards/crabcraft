@@ -1,5 +1,9 @@
 # crabgen: WIT-driven guest project generator
 
+> Errata (as-built): the e2e cases shipped as `test/e2e_crabgen.py` (not
+> e2e_sim.py) and the deploy verb is `crb deploy` — `crb apply` below is
+> historical and never existed.
+
 Design validated 2026-06-10. Goal: guests stop hand-rolling the WIRE codec and
 crab ABI. You write a `.wit` and one impl file; everything else is generated.
 

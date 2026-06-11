@@ -158,6 +158,11 @@ fn resources_are_unsupported() {
 // If wit/hello.json is ever regenerated with a newer wasm-tools and this fails,
 // per plan Task 1.2 step 4 the round-trip invariant becomes the assertion and
 // gen/schema.json the canonical form.
+//
+// NOTE: wit/hello.{wit,json} is a self-consistent test fixture for this
+// schema-fidelity check only. The deployed source of truth for the hello
+// guest is guest/hello/gen/schema.json (crabgen-managed, freshness-gated
+// by `crabgen check`); test/e2e_sim.py serves schemas from there.
 #[test]
 fn schema_json_matches_wasm_tools_json() {
     let root = repo_root();

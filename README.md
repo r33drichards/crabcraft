@@ -87,3 +87,6 @@ survives reboots, travels with the disk.
 - `test/e2e_sim.py` — full cluster in the CraftOS-PC simulator: gateway + 2
   workers + client; deploy/reconcile/reschedule, typed invokes, cross-module
   mesh, all language lanes, sqlite volume persistence. **9/9.**
+- `python3 test/e2e_crabgen.py go rust cpp ts` — the full crabgen developer
+  workflow per lane (scaffold, build, deploy, invoke; then WIT evolution with
+  check/regen) in the same simulator. **40/40** (~26 min).

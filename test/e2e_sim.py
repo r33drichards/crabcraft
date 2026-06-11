@@ -26,13 +26,16 @@ HOST_LIBS = {n: slurp(f"host/{n}.lua") for n in
              ["json", "cmval", "schema", "yaml", "runtime", "client", "worker", "gateway"]}
 BUNDLE = slurp(os.path.expanduser("~/wasmcraft/dist/wasmcraft.lua"))
 HELLO_WASM = slurp("modules/hello.wasm", binary=True)
-HELLO_SCHEMA = slurp("wit/hello.json")
+# Deployed schemas for crabgen-managed guests come from their gen/ trees —
+# the single source of truth, freshness-gated by `crabgen check`. (wit/hello.*
+# remains only as a fixture for the ir.rs schema-fidelity test.)
+HELLO_SCHEMA = slurp("guest/hello/gen/schema.json")
 CALLER_WASM = slurp("modules/caller.wasm", binary=True) if os.path.exists("modules/caller.wasm") else None
 CALLER_SCHEMA = slurp("wit/caller.json") if os.path.exists("wit/caller.json") else None
 SQLITE_WASM = slurp("modules/sqlite.wasm", binary=True) if os.path.exists("modules/sqlite.wasm") else None
 SQLITE_SCHEMA = slurp("wit/sqlite.json") if os.path.exists("wit/sqlite.json") else None
 GO_WASM = slurp("modules/hello-go.wasm", binary=True) if os.path.exists("modules/hello-go.wasm") else None
-GO_SCHEMA = slurp("wit/hello-go.json") if os.path.exists("wit/hello-go.json") else None
+GO_SCHEMA = slurp("guest/hello-go/gen/schema.json") if os.path.exists("guest/hello-go/gen/schema.json") else None
 JS_WASM = slurp("modules/hello-js.wasm", binary=True) if os.path.exists("modules/hello-js.wasm") else None
 
 B64 = '''
