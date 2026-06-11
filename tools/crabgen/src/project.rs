@@ -205,7 +205,7 @@ fn rewrite_gen(module: &Module, backend: &dyn Backend, dir: &Path, wit_path: &Pa
 
 fn build_outcome(module: &Module, backend: &dyn Backend, dir: &Path) -> Result<Outcome> {
     Ok(Outcome {
-        impl_file: format!("impl.{}", backend.impl_ext()),
+        impl_file: backend.impl_file(),
         missing_impls: backend.missing_impls(module, dir)?,
     })
 }

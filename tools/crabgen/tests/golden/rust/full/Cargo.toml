@@ -1,0 +1,14 @@
+# crabcraft guest crate (Rust lane), scaffolded by crabgen. Written once and
+# never overwritten — but note: if the WIT later GAINS imports, add
+# `features = ["mesh"]` to the crab-sdk dependency (regen will remind you).
+[package]
+name = "full"
+version = "0.1.0"
+edition = "2021"
+description = "crabcraft guest module: crab:full/kitchen@0.1.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+crab-sdk = { path = "../crab-sdk", features = ["mesh"] }

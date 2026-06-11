@@ -349,12 +349,12 @@ fn regen_all_regenerates_every_project() {
 #[test]
 fn regen_errors_for_langs_without_backends() {
     let tmp = make_repo();
-    add_project(tmp.path(), "x", "rust", VALID_WIT);
+    add_project(tmp.path(), "x", "cpp", VALID_WIT);
 
     let out = crabgen(tmp.path(), &["regen", "guest/x"]);
     assert!(!out.status.success());
     assert!(
-        all_output(&out).contains("no backend for lang rust yet"),
+        all_output(&out).contains("no backend for lang cpp yet"),
         "{}",
         all_output(&out)
     );
@@ -412,10 +412,10 @@ fn new_scaffolds_a_working_project() {
 fn new_cleans_up_after_itself_when_backend_is_missing() {
     let tmp = make_repo();
 
-    let out = crabgen(tmp.path(), &["new", "doomed", "--lang", "rust"]);
+    let out = crabgen(tmp.path(), &["new", "doomed", "--lang", "cpp"]);
     assert!(!out.status.success());
     assert!(
-        all_output(&out).contains("no backend for lang rust yet"),
+        all_output(&out).contains("no backend for lang cpp yet"),
         "{}",
         all_output(&out)
     );

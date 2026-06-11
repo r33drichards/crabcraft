@@ -5,6 +5,8 @@
 //! without an import of (module `"crabcraft"`, field `"call"`). Only crates
 //! that enable the feature *and* call [`mesh_call`] link the import.
 
+// only the wasm half decodes replies; the host-side stub never touches them
+#[cfg(target_arch = "wasm32")]
 use crate::value::{Type, Value};
 
 #[cfg(target_arch = "wasm32")]

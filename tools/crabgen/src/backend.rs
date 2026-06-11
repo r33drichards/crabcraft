@@ -11,6 +11,7 @@ use std::path::Path;
 use anyhow::{bail, Result};
 
 use crate::backend_go::GoBackend;
+use crate::backend_rust::RustBackend;
 use crate::ir::Module;
 
 /// Invariant: every `dir` passed in is `<repo_root>/guest/<name>` — backends
@@ -20,6 +21,12 @@ pub trait Backend {
     fn lang(&self) -> &'static str;
     /// Extension of the hand-written impl file (`impl.<ext>`).
     fn impl_ext(&self) -> &'static str;
+    /// Project-relative path of the hand-written impl file, as shown to the
+    /// user ("add these to <impl_file>:"). Defaults to `impl.<ext>`; the
+    /// Rust lane overrides it (src/app.rs).
+    fn impl_file(&self) -> String {
+        format!("impl.{}", self.impl_ext())
+    }
     /// Emit gen/ contents beyond schema.json + MANIFEST (the driver writes
     /// those), plus the project README (WIT-derived, so regenerated — at the
     /// project root, not gen/).
@@ -36,8 +43,9 @@ pub fn backend_for(lang: &str) -> Result<Box<dyn Backend>> {
         // placeholder lane used by crabgen's own tests
         "test" => Ok(Box::new(TestBackend)),
         "go" => Ok(Box::new(GoBackend)),
-        // remaining lanes land in later phases (rust → cpp → ts)
-        "rust" | "cpp" | "ts" => bail!("no backend for lang {lang} yet"),
+        "rust" => Ok(Box::new(RustBackend)),
+        // remaining lanes land in later phases (cpp → ts)
+        "cpp" | "ts" => bail!("no backend for lang {lang} yet"),
         other => bail!("unknown lang `{other}` (expected one of: rust, go, cpp, ts)"),
     }
 }
