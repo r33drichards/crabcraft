@@ -438,7 +438,7 @@ __attribute__((export_name("crab_invoke"))) const uint8_t* crab_invoke(
     }
   } unpin{(uintptr_t)name_ptr, (uintptr_t)arg_ptr};
 
-  std::string name(name_ptr, (size_t)name_len);
+  std::string name(name_ptr, name_len > 0 ? (size_t)name_len : 0);
   auto& handlers = crab::Handlers();
   auto it = handlers.find(name);
   if (it == handlers.end()) return ReplyErr("unknown function: " + name);

@@ -12,7 +12,7 @@
 // success). Generated code is straight-line:
 //
 //   auto r0 = d.U32();
-//   if (!r0.ok()) return crab::Res<std::vector<uint8_t>>::fail(r0.err);
+//   if (!r0.ok()) return crab::Res<std::vector<uint8_t>>::fail(std::move(r0.err));
 //   use(r0.val);
 //
 // The one fallible operation with no value, Decoder::Finish, returns a bare
@@ -60,7 +60,9 @@ namespace crab {
 
 // Res<T>: the no-exceptions error channel. Aggregate on purpose — generated
 // code and the runtime use `return {value, {}}` for success and
-// `Res<T>::fail(msg)` for errors.
+// `Res<T>::fail(msg)` for errors. T must be default-constructible (emitter
+// contract; matters for generated std::variant types, whose first
+// alternative must therefore be default-constructible too).
 template <class T>
 struct Res {
   T val{};

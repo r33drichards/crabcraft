@@ -24,6 +24,8 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -51,9 +53,20 @@ static int hexNib(char c) {
 }
 
 static std::vector<uint8_t> hexDecode(const char* s) {
+  size_t len = std::strlen(s);
+  if (len % 2 != 0) {
+    std::printf("bad hex (odd length): %s\n", s);
+    std::abort();
+  }
   std::vector<uint8_t> out;
-  for (size_t i = 0; s[i] && s[i + 1]; i += 2)
-    out.push_back((uint8_t)((hexNib(s[i]) << 4) | hexNib(s[i + 1])));
+  for (size_t i = 0; i < len; i += 2) {
+    int hi = hexNib(s[i]), lo = hexNib(s[i + 1]);
+    if (hi < 0 || lo < 0) {
+      std::printf("bad hex digit: %s\n", s);
+      std::abort();
+    }
+    out.push_back((uint8_t)((hi << 4) | lo));
+  }
   return out;
 }
 

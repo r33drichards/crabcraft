@@ -195,7 +195,19 @@ fn gen_encode(ty: &Value, val: &Value, code: &mut String) {
         "record" => {
             for f in ty["fields"].as_array().expect("record fields") {
                 let name = f["name"].as_str().expect("field name");
-                let fv = val.get(name).unwrap_or(&Value::Null);
+                // A field may only be omitted when it is an option (encodes
+                // as none); anything else missing is a broken vector.
+                let fv = match val.get(name) {
+                    Some(v) => v,
+                    None => {
+                        assert_eq!(
+                            kind(&f["type"]),
+                            "option",
+                            "record field {name:?} missing from value and not an option"
+                        );
+                        &Value::Null
+                    }
+                };
                 gen_encode(&f["type"], fv, code);
             }
         }
