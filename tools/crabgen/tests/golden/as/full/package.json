@@ -1,0 +1,11 @@
+{
+  "name": "full",
+  "private": true,
+  "description": "crabcraft AssemblyScript guest (scaffolded by crabgen)",
+  "scripts": {
+    "build": "./build.sh"
+  },
+  "devDependencies": {
+    "assemblyscript": "0.28.18"
+  }
+}

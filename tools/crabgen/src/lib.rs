@@ -1,4 +1,5 @@
 pub mod backend;
+pub mod backend_as;
 pub mod backend_cpp;
 pub mod backend_go;
 pub mod backend_rust;
