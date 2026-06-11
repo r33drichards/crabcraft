@@ -29,6 +29,11 @@ impl W {
         Self::with_unit("    ")
     }
 
+    /// Two-space-indented writer (C++ — the templates/cpp house style).
+    pub fn spaces2() -> Self {
+        Self::with_unit("  ")
+    }
+
     fn with_unit(unit: &'static str) -> Self {
         W {
             buf: String::new(),

@@ -10,6 +10,7 @@ use std::path::Path;
 
 use anyhow::{bail, Result};
 
+use crate::backend_cpp::CppBackend;
 use crate::backend_go::GoBackend;
 use crate::backend_rust::RustBackend;
 use crate::ir::Module;
@@ -44,8 +45,9 @@ pub fn backend_for(lang: &str) -> Result<Box<dyn Backend>> {
         "test" => Ok(Box::new(TestBackend)),
         "go" => Ok(Box::new(GoBackend)),
         "rust" => Ok(Box::new(RustBackend)),
-        // remaining lanes land in later phases (cpp → ts)
-        "cpp" | "ts" => bail!("no backend for lang {lang} yet"),
+        "cpp" => Ok(Box::new(CppBackend)),
+        // the last lane lands in phase 5
+        "ts" => bail!("no backend for lang {lang} yet"),
         other => bail!("unknown lang `{other}` (expected one of: rust, go, cpp, ts)"),
     }
 }
