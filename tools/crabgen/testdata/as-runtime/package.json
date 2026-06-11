@@ -1,0 +1,8 @@
+{
+  "name": "as-runtime-vectors",
+  "private": true,
+  "description": "WIRE conformance scratch project for the crabgen AssemblyScript runtime template (driven by tests/as_vectors.rs)",
+  "devDependencies": {
+    "assemblyscript": "0.28.18"
+  }
+}

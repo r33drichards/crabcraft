@@ -1,0 +1,6 @@
+# node_modules is restored by tests/as_vectors.rs via `npm ci`.
+node_modules/
+# assembly/gen is refreshed from templates/ts/assembly/gen on every test run;
+# assembly/vectors.ts is generated from wit/vectors.json by the test.
+assembly/gen/
+assembly/vectors.ts
