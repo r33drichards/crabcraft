@@ -90,14 +90,20 @@ def ensure_sim_server():
 
 def run_cluster(name, wasm_path, client_body):
     """Gateway + 1 worker (preloaded with the lane's wasm) + client running
-    `client_body`. Returns the client node's collected emit() output."""
+    `client_body`. Returns the client node's collected emit() output.
+
+    All three nodes collect output: a worker-side failure (e.g. the wasm
+    refuses to load) never reaches the client's emits, so on any failed check
+    the dump below is the diagnostic — mirror e2e_sim main()'s habit of
+    printing the whole sim transcript."""
     with open(wasm_path, "rb") as f:
         wasm = f.read()
     spec = {
         "timeout_ms": 180000,
         "nodes": [
-            {"label": "gateway", "position": [0, 0, 0], "program": sim.gateway_prog},
-            {"label": "worker1", "position": [2, 0, 0],
+            {"label": "gateway", "position": [0, 0, 0], "collect": True,
+             "program": sim.gateway_prog},
+            {"label": "worker1", "position": [2, 0, 0], "collect": True,
              "program": sim.worker_prog("w1", {f"{name}.wasm": wasm})},
             {"label": "client", "position": [4, 0, 0], "collect": True,
              "program": sim.client_prog(client_body)},
@@ -106,10 +112,10 @@ def run_cluster(name, wasm_path, client_body):
     text = sim.run_sim(spec)
     data = json.loads(text)
     out = {n["label"]: n["output"] for n in data["nodes"]}
-    client_out = out.get("client", "")
-    print("==== client output ====")
-    print(client_out)
-    return client_out
+    for label in ("gateway", "worker1", "client"):
+        print(f"==== {label} output ====")
+        print(out.get(label, "(no output)"))
+    return out.get("client", "")
 
 
 def client_body(name, schema_json, invokes):
@@ -193,6 +199,13 @@ func (App) Shout(msg string) (string, error) {
         f.write(src)
 
 
+# The per-lane seam. Behavioral contract every lane must honor:
+#   write_impl(proj, name) — greet returns "Hello, <name>" + ("!!!" if excited else "!")
+#   add_shout(proj, name)  — shout returns uppercase(msg) + "!"
+#   shout_sig              — substring `crabgen regen` must print for the missing shout impl
+# Optional: cleanup(proj, name) — invoked in run_lane's finally for lane-specific
+# residue outside guest/<name> and modules/<name>.wasm (root Cargo.toml is
+# already snapshot/restored for everyone — rust's `new` edits its members).
 LANE = {
     "go": {
         "write_impl": go_write_impl,
@@ -276,6 +289,10 @@ def case_b(lane, name, proj, wasm_out):
     with open(os.path.join(proj, f"{name}.wit"), "w") as f:
         f.write(wit_v2(name))
 
+    # NOTE: `crabgen check` is repo-wide — these two assertions (fails here,
+    # passes later) also depend on every OTHER guest project being fresh. An
+    # unrelated stale project fails them spuriously (deliberate: keeps the
+    # whole repo honest).
     p = run([CRABGEN, "check"], expect=None)
     check(f"{lane} B: check fails on stale WIT",
           p.returncode != 0 and f"guest/{name}" in p.stderr,
@@ -322,6 +339,13 @@ def run_lane(lane):
     if os.path.exists(wasm_out):  # shouldn't happen, but restore if it does
         with open(wasm_out, "rb") as f:
             prior_wasm = f.read()
+    # `new --lang rust` appends the project crate to the root workspace
+    # members; without restoring this, a failed run leaves a dangling entry
+    # that breaks every later cargo invocation. Snapshot/restore is
+    # lane-agnostic and harmless for lanes that never touch it.
+    cargo_toml = os.path.join(ROOT, "Cargo.toml")
+    with open(cargo_toml) as f:
+        prior_cargo_toml = f.read()
     try:
         case_a(lane, name, proj, wasm_out)
         case_b(lane, name, proj, wasm_out)
@@ -332,6 +356,11 @@ def run_lane(lane):
                 f.write(prior_wasm)
         elif os.path.exists(wasm_out):
             os.remove(wasm_out)
+        with open(cargo_toml, "w") as f:
+            f.write(prior_cargo_toml)
+        cleanup = LANE[lane].get("cleanup")
+        if cleanup:
+            cleanup(proj, name)
         log(f"[{lane}] cleaned up guest/{name} and modules/{name}.wasm")
 
 
