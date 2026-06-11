@@ -242,6 +242,44 @@ def rust_add_shout(proj, name):
         f.write(src)
 
 
+# ---- cpp lane ----------------------------------------------------------------------
+
+def cpp_write_impl(proj, name):
+    """The scaffold-case impl: greet only (defines the impl:: function
+    declared in gen/bindings.hpp)."""
+    with open(os.path.join(proj, "impl.cpp"), "w") as f:
+        f.write(f"""// e2e impl for the {name} guest.
+#include "gen/bindings.hpp"
+
+namespace impl {{
+
+crab::Res<std::string> greet(gen::GreetRequest req) {{
+  std::string bang = (req.excited.has_value() && *req.excited) ? "!!!" : "!";
+  return {{"Hello, " + req.name + bang, {{}}}};
+}}
+
+}}  // namespace impl
+""")
+
+
+def cpp_add_shout(proj, name):
+    """What a maintainer does after regen prints the missing shout signature:
+    reopen namespace impl at the end of impl.cpp with the definition."""
+    with open(os.path.join(proj, "impl.cpp"), "a") as f:
+        f.write("""
+namespace impl {
+
+crab::Res<std::string> shout(std::string msg) {
+  for (auto& c : msg) {
+    if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+  }
+  return {msg + "!", {}};
+}
+
+}  // namespace impl
+""")
+
+
 # The per-lane seam. Behavioral contract every lane must honor:
 #   write_impl(proj, name) — greet returns "Hello, <name>" + ("!!!" if excited else "!")
 #   add_shout(proj, name)  — shout returns uppercase(msg) + "!"
@@ -261,6 +299,13 @@ LANE = {
         "write_impl": rust_write_impl,
         "add_shout": rust_add_shout,
         "shout_sig": "fn shout(&self, msg: String) -> Result<String, String>",
+    },
+    "cpp": {
+        # impl.cpp + build.sh live entirely inside guest/<name>; the wasm and
+        # the (snapshot/restored) root manifests are handled lane-agnostically.
+        "write_impl": cpp_write_impl,
+        "add_shout": cpp_add_shout,
+        "shout_sig": "crab::Res<std::string> shout(std::string msg)",
     },
 }
 
