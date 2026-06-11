@@ -1,3 +1,4 @@
-module crabcraft/hello-go
+// crabcraft guest module (Go lane), scaffolded by crabgen.
+module crabcraft.local/hello-go
 
-go 1.25
+go 1.24
