@@ -3,7 +3,11 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "crabgen", version, about = "WIT-driven guest project generator for crabcraft")]
+#[command(
+    name = "crabgen",
+    version,
+    about = "WIT-driven guest project generator for crabcraft"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -19,6 +23,7 @@ enum Command {
     },
     /// Re-emit gen/ for one project (or every project with --all)
     Regen {
+        #[arg(conflicts_with = "all", required_unless_present = "all")]
         path: Option<PathBuf>,
         #[arg(long)]
         all: bool,

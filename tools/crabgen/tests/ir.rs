@@ -70,7 +70,10 @@ fn full_fixture_loads_into_ir() {
         .iter()
         .find(|f| f.wit_name == "echo-everything")
         .expect("func echo-everything");
-    assert_eq!(echo.params, vec![("e".into(), Ty::Named("everything".into()))]);
+    assert_eq!(
+        echo.params,
+        vec![("e".into(), Ty::Named("everything".into()))]
+    );
     assert_eq!(echo.result, Some(Ty::Named("everything".into())));
 
     // function with no result
@@ -89,13 +92,58 @@ fn full_fixture_loads_into_ir() {
         .expect("func try-divide");
     assert_eq!(
         try_divide.result,
-        Some(Ty::Result(Some(Box::new(Ty::F64)), Some(Box::new(Ty::String))))
+        Some(Ty::Result(
+            Some(Box::new(Ty::F64)),
+            Some(Box::new(Ty::String))
+        ))
+    );
+
+    // anonymous compounds are inlined structurally, not Named
+    let maybe_list = kitchen
+        .funcs
+        .iter()
+        .find(|f| f.wit_name == "maybe-list")
+        .expect("func maybe-list");
+    assert_eq!(
+        maybe_list.params,
+        vec![(
+            "xs".into(),
+            Ty::Option(Box::new(Ty::List(Box::new(Ty::U16))))
+        )]
+    );
+    assert_eq!(
+        maybe_list.result,
+        Some(Ty::List(Box::new(Ty::Option(Box::new(Ty::Bool)))))
+    );
+
+    // import side: result<_, string> lowers with an absent ok type
+    let report = telemetry
+        .funcs
+        .iter()
+        .find(|f| f.wit_name == "report")
+        .expect("func report");
+    assert_eq!(
+        report.result,
+        Some(Ty::Result(None, Some(Box::new(Ty::String))))
     );
 
     // schema_json is real resolved-WIT JSON
     let v: serde_json::Value =
         serde_json::from_str(&m.schema_json).expect("schema_json parses as JSON");
-    assert!(v.get("worlds").is_some(), "schema_json has a \"worlds\" key");
+    assert!(
+        v.get("worlds").is_some(),
+        "schema_json has a \"worlds\" key"
+    );
+}
+
+#[test]
+fn cross_interface_use_is_unsupported() {
+    let err =
+        wit::load(&fixture("crossuse.wit")).expect_err("`use` across interfaces must be rejected");
+    assert!(
+        format!("{err:#}").contains("unsupported"),
+        "error should say unsupported, got: {err:#}"
+    );
 }
 
 #[test]
@@ -107,6 +155,9 @@ fn resources_are_unsupported() {
     );
 }
 
+// If wit/hello.json is ever regenerated with a newer wasm-tools and this fails,
+// per plan Task 1.2 step 4 the round-trip invariant becomes the assertion and
+// gen/schema.json the canonical form.
 #[test]
 fn schema_json_matches_wasm_tools_json() {
     let root = repo_root();

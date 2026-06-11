@@ -5,7 +5,7 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use wit_parser::{
-    FunctionKind, Interface, InterfaceId, Resolve, Type, TypeDefKind, WorldItem,
+    FunctionKind, Interface, InterfaceId, Resolve, Type, TypeDefKind, TypeOwner, WorldItem,
 };
 
 use crate::ir::{Func, Iface, Module, NamedTy, Ty};
@@ -24,15 +24,22 @@ pub fn load(path: &Path) -> Result<Module> {
     let mut worlds = pkg.worlds.values();
     let world_id = match (worlds.next(), worlds.next()) {
         (Some(&w), None) => w,
-        (None, _) => bail!("package `{package}` defines no world; add `world <name> {{ export <iface>; }}`"),
-        (Some(_), Some(_)) => bail!("package `{package}` defines more than one world; crabgen v1 supports exactly one"),
+        (None, _) => {
+            bail!("package `{package}` defines no world; add `world <name> {{ export <iface>; }}`")
+        }
+        (Some(_), Some(_)) => bail!(
+            "package `{package}` defines more than one world; crabgen v1 supports exactly one"
+        ),
     };
     let world = &resolve.worlds[world_id];
 
     let mut exports = Vec::new();
     for (_, item) in &world.exports {
         match item {
-            WorldItem::Interface { id, .. } => exports.push(lower_iface(&resolve, *id)?),
+            WorldItem::Interface { id, .. } => exports.push(
+                lower_iface(&resolve, *id)
+                    .with_context(|| format!("in exports of world `{}`", world.name))?,
+            ),
             WorldItem::Function(f) => bail!(
                 "world `{}` exports function `{}` at the top level; unsupported in v1 — move it into an exported interface",
                 world.name, f.name
@@ -58,7 +65,10 @@ pub fn load(path: &Path) -> Result<Module> {
     let mut imports = Vec::new();
     for (_, item) in &world.imports {
         match item {
-            WorldItem::Interface { id, .. } => imports.push(lower_iface(&resolve, *id)?),
+            WorldItem::Interface { id, .. } => imports.push(
+                lower_iface(&resolve, *id)
+                    .with_context(|| format!("in imports of world `{}`", world.name))?,
+            ),
             WorldItem::Function(f) => bail!(
                 "world `{}` imports function `{}` at the top level; unsupported in v1 — move it into an imported interface",
                 world.name, f.name
@@ -89,6 +99,16 @@ fn lower_iface(resolve: &Resolve, id: InterfaceId) -> Result<Iface> {
     let mut types = Vec::new();
     for (name, &tid) in &iface.types {
         let td = &resolve.types[tid];
+        // `use other.{t};` resolves to an alias whose target lives in another
+        // interface; following it would emit a self-referential Named and drag
+        // the type-provider interface into Module.imports as a mesh stub.
+        if let TypeDefKind::Type(Type::Id(orig)) = &td.kind {
+            if resolve.types[*orig].owner != TypeOwner::Interface(id) {
+                bail!(
+                    "`use` across interfaces is unsupported in v1 — declare the type in the interface that uses it (type `{name}` in `{instance}`)"
+                );
+            }
+        }
         let ty = lower_typedef_kind(resolve, &td.kind)
             .with_context(|| format!("in type `{name}` of `{instance}`"))?;
         types.push(NamedTy {
@@ -174,7 +194,9 @@ fn lower_typedef_kind(resolve: &Resolve, kind: &TypeDefKind) -> Result<Ty> {
                 .map(|c| {
                     Ok((
                         c.name.clone(),
-                        c.ty.as_ref().map(|ty| lower_type(resolve, ty)).transpose()?,
+                        c.ty.as_ref()
+                            .map(|ty| lower_type(resolve, ty))
+                            .transpose()?,
                     ))
                 })
                 .collect::<Result<Vec<_>>>()?,

@@ -1,0 +1,20 @@
+// crabgen test fixture: `use` across interfaces is unsupported in v1 and
+// must be rejected (would otherwise emit a self-referential alias and leak
+// the type-provider interface into Module.imports).
+package crab:crossuse@0.1.0;
+
+interface types {
+  record sample {
+    at: u64,
+  }
+}
+
+interface telemetry {
+  use types.{sample};
+
+  report: func(s: sample) -> bool;
+}
+
+world crossuse {
+  export telemetry;
+}
