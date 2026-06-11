@@ -406,7 +406,13 @@ enum Ret<'a> {
 // ---------------------------------------------------------------------------
 
 /// Per-function emission state: fresh temp names and the error-return
-/// statement pattern for the current context (`{}` = the error expression).
+/// statement pattern for the current context (`{}` = the error expression,
+/// always a BARE lvalue like `r0.err` or `e0`). The pattern owns any
+/// std::move placement: contexts passing the error onward as an argument
+/// wrap it (`fail(std::move({}))` — moving into a parameter is always
+/// right), while the encode-helper context returns the local by name
+/// (`return {};` → `return e0;`) so NRVO/implicit move applies —
+/// `return std::move(local)` would be -Wpessimizing-move.
 struct Cx {
     tmp: usize,
     fail_fmt: String,
@@ -483,10 +489,7 @@ fn emit_encode(w: &mut W, cx: &mut Cx, ty: &Ty, expr: &str) -> Result<()> {
         Ty::Named(n) => {
             let e = cx.fresh("e");
             w.line(format!("auto {e} = encode{}(out, {expr});", cpp_pascal(n)));
-            w.line(format!(
-                "if (!{e}.empty()) {}",
-                cx.fail(&format!("std::move({e})"))
-            ));
+            w.line(format!("if (!{e}.empty()) {}", cx.fail(&e)));
         }
         Ty::Record(_) | Ty::Variant(_) | Ty::Enum(_) | Ty::Flags(_) => {
             bail!("internal error: anonymous {ty:?} in encode position")
@@ -506,10 +509,7 @@ fn emit_decode(w: &mut W, cx: &mut Cx, ty: &Ty, dest: &str) -> Result<()> {
         Ty::List(t) => {
             let r = cx.fresh("r");
             w.line(format!("auto {r} = d.ListLen();"));
-            w.line(format!(
-                "if (!{r}.ok()) {}",
-                cx.fail(&format!("std::move({r}.err)"))
-            ));
+            w.line(format!("if (!{r}.ok()) {}", cx.fail(&format!("{r}.err"))));
             // the count is attacker-controlled: clamp pre-allocation (the
             // sibling lanes cap initial capacity at 4096) and push_back
             w.line(format!(
@@ -526,15 +526,18 @@ fn emit_decode(w: &mut W, cx: &mut Cx, ty: &Ty, dest: &str) -> Result<()> {
         Ty::Option(t) => {
             let r = cx.fresh("r");
             w.line(format!("auto {r} = d.OptionTag();"));
-            w.line(format!(
-                "if (!{r}.ok()) {}",
-                cx.fail(&format!("std::move({r}.err)"))
-            ));
+            w.line(format!("if (!{r}.ok()) {}", cx.fail(&format!("{r}.err"))));
             w.open(format!("if ({r}.val) {{"));
-            let x = cx.fresh("x");
-            w.line(format!("{} {x}{{}};", cpp_ty(t, "")?));
-            emit_decode(w, cx, t, &x)?;
-            w.line(format!("{dest} = std::move({x});"));
+            if is_unit(t) {
+                // encode's twin: a unit payload carries zero bytes, so skip
+                // the temp — but the optional must still become engaged
+                w.line(format!("{dest} = {}{{}};", cpp_ty(t, "")?));
+            } else {
+                let x = cx.fresh("x");
+                w.line(format!("{} {x}{{}};", cpp_ty(t, "")?));
+                emit_decode(w, cx, t, &x)?;
+                w.line(format!("{dest} = std::move({x});"));
+            }
             w.close("}");
         }
         Ty::Tuple(ts) => {
@@ -545,10 +548,7 @@ fn emit_decode(w: &mut W, cx: &mut Cx, ty: &Ty, dest: &str) -> Result<()> {
         Ty::Result(ok, errt) => {
             let r = cx.fresh("r");
             w.line(format!("auto {r} = d.ResultTag();"));
-            w.line(format!(
-                "if (!{r}.ok()) {}",
-                cx.fail(&format!("std::move({r}.err)"))
-            ));
+            w.line(format!("if (!{r}.ok()) {}", cx.fail(&format!("{r}.err"))));
             w.line(format!("{dest}.is_err = {r}.val;"));
             match (ok.as_deref(), errt.as_deref()) {
                 (Some(okt), Some(et)) => {
@@ -575,10 +575,7 @@ fn emit_decode(w: &mut W, cx: &mut Cx, ty: &Ty, dest: &str) -> Result<()> {
         Ty::Named(n) => {
             let r = cx.fresh("r");
             w.line(format!("auto {r} = decode{}(d);", cpp_pascal(n)));
-            w.line(format!(
-                "if (!{r}.ok()) {}",
-                cx.fail(&format!("std::move({r}.err)"))
-            ));
+            w.line(format!("if (!{r}.ok()) {}", cx.fail(&format!("{r}.err"))));
             w.line(format!("{dest} = std::move({r}.val);"));
         }
         Ty::Record(_) | Ty::Variant(_) | Ty::Enum(_) | Ty::Flags(_) => {
@@ -588,10 +585,7 @@ fn emit_decode(w: &mut W, cx: &mut Cx, ty: &Ty, dest: &str) -> Result<()> {
             let (_, dec, _) = scalar(ty).ok_or_else(|| anyhow!("unmapped type {ty:?}"))?;
             let r = cx.fresh("r");
             w.line(format!("auto {r} = d.{dec}();"));
-            w.line(format!(
-                "if (!{r}.ok()) {}",
-                cx.fail(&format!("std::move({r}.err)"))
-            ));
+            w.line(format!("if (!{r}.ok()) {}", cx.fail(&format!("{r}.err"))));
             w.line(format!("{dest} = std::move({r}.val);"));
         }
     }
@@ -1201,6 +1195,12 @@ impl<'a> Gen<'a> {
             out.push_str("#include \"mesh.hpp\"\n");
         }
         out.push_str("#include \"schema_json.h\"\n\n");
+        out.push_str(
+            "// Codec helpers are emitted for every named type in both directions even\n\
+             // when this module only encodes or only decodes it (analog of the Rust\n\
+             // lane's #![allow(dead_code)]; clang honors GCC diagnostic pragmas).\n\
+             #pragma GCC diagnostic ignored \"-Wunused-function\"\n\n",
+        );
         out.push_str(&w.buf);
         Ok(trim_final(&out))
     }
@@ -1208,7 +1208,7 @@ impl<'a> Gen<'a> {
     fn emit_type_codecs(&self, w: &mut W, t: &NamedTy) -> Result<()> {
         let p = cpp_pascal(&t.wit_name);
         let enc_fail = "return {};".to_string();
-        let dec_fail = format!("return crab::Res<{p}>::fail({{}});");
+        let dec_fail = format!("return crab::Res<{p}>::fail(std::move({{}}));");
         match &t.ty {
             Ty::Record(fields) => {
                 w.line(format!(
@@ -1325,7 +1325,7 @@ impl<'a> Gen<'a> {
 
                 w.line(format!("// decode{p} decodes a {p} off d."));
                 w.open(format!("crab::Res<{p}> decode{p}(crab::Decoder& d) {{"));
-                let mut cx = Cx::new(format!("return crab::Res<{p}>::fail({{}});"));
+                let mut cx = Cx::new(format!("return crab::Res<{p}>::fail(std::move({{}}));"));
                 let r = cx.fresh("r"); // r0, matching the temp scheme
                 w.line(format!("auto {r} = d.VariantCase({});", cases.len()));
                 w.line(format!(
@@ -1399,7 +1399,9 @@ impl<'a> Gen<'a> {
             iface.instance, f.wit_name
         ));
         w.open(format!("{RES} handle_{ident}(crab::Decoder& d) {{"));
-        let mut cx = Cx::new(format!("return {RES}::fail(\"bad params: \" + {{}});"));
+        let mut cx = Cx::new(format!(
+            "return {RES}::fail(\"bad params: \" + std::move({{}}));"
+        ));
         for (n, t) in &f.params {
             let pn = cpp_param(n);
             w.line(format!("{} {pn}{{}};", cpp_ty(t, "")?));
@@ -1416,7 +1418,7 @@ impl<'a> Gen<'a> {
             .collect::<Vec<_>>()
             .join(", ");
         w.line(format!("auto r = impl::{ident}({args});"));
-        cx.fail_fmt = format!("return {RES}::fail({{}});");
+        cx.fail_fmt = format!("return {RES}::fail(std::move({{}}));");
         match self.classify(f)? {
             Ret::None => {
                 w.line(format!(
@@ -1457,6 +1459,9 @@ impl<'a> Gen<'a> {
 
     // -- mesh wrappers -----------------------------------------------------------
 
+    /// Params are BY VALUE on purpose, matching the impl:: convention: the
+    /// wrapper consumes them (encodes into the request), and callers can
+    /// std::move expensive arguments in.
     fn mesh_wrapper_sig(&self, iface: &Iface, f: &'a Func, qual: &str) -> Result<String> {
         let mut params = vec!["std::string_view workload".to_string()];
         for (n, t) in &f.params {
@@ -1486,7 +1491,7 @@ impl<'a> Gen<'a> {
         };
         w.line(res_note);
         w.open(format!("{} {{", self.mesh_wrapper_sig(iface, f, "")?));
-        let mut cx = Cx::new(format!("return {res}::fail({{}});"));
+        let mut cx = Cx::new(format!("return {res}::fail(std::move({{}}));"));
         w.line("std::vector<uint8_t> out;");
         for (n, t) in &f.params {
             emit_encode(w, &mut cx, t, &cpp_param(n))?;
@@ -1665,6 +1670,9 @@ fn schema_json_h(schema: &str) -> String {
     )
 }
 
+/// The zig flag set below must stay in step with WASM_FLAGS in
+/// tests/golden_cpp.rs — the compile test proves exactly these flags link a
+/// working reactor.
 fn build_sh(name: &str) -> String {
     format!(
         r#"#!/usr/bin/env bash

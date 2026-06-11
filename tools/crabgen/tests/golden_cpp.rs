@@ -164,6 +164,9 @@ fn run_in(dir: &Path, mut cmd: Command, what: &str) {
     );
 }
 
+/// Must stay in step with the zig invocation build_sh() emits
+/// (src/backend_cpp.rs) — this test proves exactly the flags the scaffolded
+/// script will use.
 const WASM_FLAGS: &[&str] = &[
     "c++",
     "-target",
@@ -207,13 +210,29 @@ fn compile_project(dir: &Path, what: &str) -> Vec<u8> {
 
     // 1. native object compile: catches type errors fast, per TU, without
     //    needing a main() to link against (`zig c++ -fsyntax-only` is broken
-    //    upstream — it reports FileNotFound for every input — so -c it is)
+    //    upstream — it reports FileNotFound for every input — so -c it is).
+    //    Generated code AND the crab/mesh templates are held to
+    //    -Wall -Wextra -Werror; the scaffolded impl.cpp is exempt (its stubs
+    //    carry named-but-unused params on purpose — the file is user-owned
+    //    and the stub bodies are transient).
+    let (impl_tus, gen_tus): (Vec<_>, Vec<_>) = tus.iter().partition(|t| !t.starts_with("gen/"));
+    let mut strict = zig_cmd();
+    zig_cache(&mut strict);
+    strict
+        .args(["c++", "-std=c++17", "-fno-exceptions", "-fno-rtti"])
+        .args(["-Wall", "-Wextra", "-Werror", "-c"])
+        .args(&gen_tus);
+    run_in(
+        dir,
+        strict,
+        &format!("zig c++ -c native strict gen/ ({what})"),
+    );
     let mut check = zig_cmd();
     zig_cache(&mut check);
     check
         .args(["c++", "-std=c++17", "-fno-exceptions", "-fno-rtti", "-c"])
-        .args(&tus);
-    run_in(dir, check, &format!("zig c++ -c native ({what})"));
+        .args(&impl_tus);
+    run_in(dir, check, &format!("zig c++ -c native impl ({what})"));
 
     // 2. the wasm reactor build with the exact build.sh flag set (full link:
     //    a missing impl:: definition fails HERE, naming the symbol)

@@ -17,6 +17,11 @@
 #include "mesh.hpp"
 #include "schema_json.h"
 
+// Codec helpers are emitted for every named type in both directions even
+// when this module only encodes or only decodes it (analog of the Rust
+// lane's #![allow(dead_code)]; clang honors GCC diagnostic pragmas).
+#pragma GCC diagnostic ignored "-Wunused-function"
+
 namespace gen {
 namespace {
 
@@ -174,7 +179,7 @@ std::string encodeShape(std::vector<uint8_t>& out, const Shape& v) {
     }
     case 3: {
       auto e0 = encodeEverything(out, std::get<3>(v).value);
-      if (!e0.empty()) return std::move(e0);
+      if (!e0.empty()) return e0;
       break;
     }
     default:
