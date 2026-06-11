@@ -104,19 +104,11 @@ local ok, err = pcall(fn)
 emit('gateway EXITED: ' .. tostring(ok) .. ' ' .. tostring(err))
 """
 
-def worker_prog(label):
+def worker_prog(label, bins, slots=3):
+    """Worker node program preloaded with `bins` ({filename: wasm bytes})."""
     worker_amalg = amalgamate(HOST_LIBS["worker"],
         {n: HOST_LIBS[n] for n in ["json", "cmval", "schema", "runtime"]})
     files = {"worker": worker_amalg, "wasmcraft": BUNDLE}
-    bins = {"hello.wasm": HELLO_WASM}
-    if CALLER_WASM and label == "w2":
-        bins["caller.wasm"] = CALLER_WASM
-    if GO_WASM and label == "w1":
-        bins["hello-go.wasm"] = GO_WASM
-    if SQLITE_WASM and label == "w1":
-        bins["sqlite.wasm"] = SQLITE_WASM
-    if JS_WASM and label == "w2":
-        bins["hello-js.wasm"] = JS_WASM
     return f"""periphemu.create('back','modem',NET,true)
 rednet.open('back')
 os.setComputerLabel('{label}')
@@ -126,9 +118,23 @@ emit('{label}: starting')
 local fn, lerr = loadfile('worker')
 if not fn then emit('{label} PARSE: ' .. tostring(lerr)) return end
 if setfenv then setfenv(fn, getfenv(1)) end
-local ok, err = pcall(fn, 'gw', '--slots', '3')
+local ok, err = pcall(fn, 'gw', '--slots', '{slots}')
 emit('{label} EXITED: ' .. tostring(ok) .. ' ' .. tostring(err))
 """
+
+
+def default_worker_bins(label):
+    """The wasm preloads this suite's workers carry (varies per worker)."""
+    bins = {"hello.wasm": HELLO_WASM}
+    if CALLER_WASM and label == "w2":
+        bins["caller.wasm"] = CALLER_WASM
+    if GO_WASM and label == "w1":
+        bins["hello-go.wasm"] = GO_WASM
+    if SQLITE_WASM and label == "w1":
+        bins["sqlite.wasm"] = SQLITE_WASM
+    if JS_WASM and label == "w2":
+        bins["hello-js.wasm"] = JS_WASM
+    return bins
 
 caller_test = ""
 if CALLER_WASM:
@@ -232,12 +238,14 @@ if not __ok then emit('CLIENT ERROR: ' .. tostring(__err)) end
 done()
 """
 
-ctest_amalg = amalgamate(client_test_body,
-    {n: HOST_LIBS[n] for n in ["json", "cmval", "schema", "yaml", "client"]})
-client_prog = f"""periphemu.create('back','modem',NET,true)
+def client_prog(body, libs=("json", "cmval", "schema", "yaml", "client")):
+    """Client node program: amalgamate `body` with host libs, run via
+    loadfile+setfenv (shell.run gives require but not emit)."""
+    amalg = amalgamate(body, {n: HOST_LIBS[n] for n in libs})
+    return f"""periphemu.create('back','modem',NET,true)
 rednet.open('back')
 os.setComputerLabel('client')
-do local h = fs.open('ctest', 'w') h.write({lua_str(ctest_amalg)}) h.close() end
+do local h = fs.open('ctest', 'w') h.write({lua_str(amalg)}) h.close() end
 sleep(4)
 emit('client: starting')
 local fn, lerr = loadfile('ctest')
@@ -248,73 +256,90 @@ if not ok then emit('CTEST RUNTIME ERROR: ' .. tostring(err)) end
 done()
 """
 
-spec = {
-    "timeout_ms": 180000,
-    "nodes": [
-        {"label": "gateway", "position": [0, 0, 0], "program": gateway_prog},
-        {"label": "worker1", "position": [2, 0, 0], "program": worker_prog("w1")},
-        {"label": "worker2", "position": [4, 0, 0], "program": worker_prog("w2")},
-        {"label": "client", "position": [6, 0, 0], "collect": True, "program": client_prog},
-    ],
-}
-
 # ---- drive the MCP server over stdio --------------------------------------------
-env = dict(os.environ)
-env["CRAFTOS_ROM"] = os.path.expanduser("~/craftos2-rom")
-env["DYLD_LIBRARY_PATH"] = os.path.expanduser("~/craftos2/craftos2-lua/src")
-proc = subprocess.Popen(
-    [os.path.expanduser("~/craftos2/mcp/target/release/craftos-mcp")],
-    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-    env=env, text=True, bufsize=1)
+MCP_BIN = os.path.expanduser("~/craftos2/mcp/target/release/craftos-mcp")
 
-def send(o):
-    proc.stdin.write(json.dumps(o) + "\n"); proc.stdin.flush()
+def sim_env():
+    env = dict(os.environ)
+    env["CRAFTOS_ROM"] = os.path.expanduser("~/craftos2-rom")
+    env["DYLD_LIBRARY_PATH"] = os.path.expanduser("~/craftos2/craftos2-lua/src")
+    return env
 
-def recv(want):
-    while True:
-        line = proc.stdout.readline()
-        if not line: sys.exit("craftos-mcp closed unexpectedly")
-        try: m = json.loads(line)
-        except Exception: continue
-        if m.get("id") == want: return m
+def run_sim(spec):
+    """Run one simulation spec through craftos-mcp; returns the tool's JSON text."""
+    proc = subprocess.Popen(
+        [MCP_BIN],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        env=sim_env(), text=True, bufsize=1)
 
-send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params":
-      {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "e2e", "version": "0"}}})
-recv(1)
-send({"jsonrpc": "2.0", "method": "notifications/initialized"})
-send({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params":
-      {"name": "run_simulation", "arguments": spec}})
-resp = recv(2)
-proc.kill()
+    def send(o):
+        proc.stdin.write(json.dumps(o) + "\n"); proc.stdin.flush()
 
-text = "".join(c.get("text", "") for c in resp.get("result", {}).get("content", []))
-print(text)
-data = json.loads(text)
-out = {n["label"]: n["output"] for n in data["nodes"]}
-client_out = out.get("client", "")
-print("==== client output ====")
-print(client_out)
+    def recv(want):
+        while True:
+            line = proc.stdout.readline()
+            if not line: sys.exit("craftos-mcp closed unexpectedly")
+            try: m = json.loads(line)
+            except Exception: continue
+            if m.get("id") == want: return m
 
-checks = [
-    ("connected", "connected to gateway" in client_out),
-    ("hello deployed", "deploy hello: true" in client_out),
-    ("hello running", "hello placed + running" in client_out),
-    ("greet via mesh routing", "greet: Hello, crab!!!" in client_out),
-    ("add via mesh routing", "add: 42" in client_out),
-]
-if CALLER_WASM:
-    checks.append(("cross-module mesh call", "mesh: via mesh: Hello, mesh!" in client_out))
-if GO_WASM:
-    checks.append(("Go reactor lane", "go greet: Hello from Go, gopher!!!" in client_out))
-if SQLITE_WASM:
-    checks.append(("SQLite C lane + volume", '"rows":[["ferris"],["gopher"]]' in client_out
-                   and "sqlite bad sql errs: true" in client_out))
-if JS_WASM:
-    checks.append(("JS command lane", "js greet: Hello from JS, quickjs!" in client_out))
+    send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params":
+          {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "e2e", "version": "0"}}})
+    recv(1)
+    send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    send({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params":
+          {"name": "run_simulation", "arguments": spec}})
+    resp = recv(2)
+    proc.kill()
+    return "".join(c.get("text", "") for c in resp.get("result", {}).get("content", []))
 
-failed = [name for name, ok in checks if not ok]
-for name, ok in checks:
-    print(("PASS " if ok else "FAIL ") + name)
-if failed:
-    sys.exit("E2E FAILED: " + ", ".join(failed))
-print("E2E ALL PASS")
+
+def main():
+    spec = {
+        "timeout_ms": 180000,
+        "nodes": [
+            {"label": "gateway", "position": [0, 0, 0], "program": gateway_prog},
+            {"label": "worker1", "position": [2, 0, 0],
+             "program": worker_prog("w1", default_worker_bins("w1"))},
+            {"label": "worker2", "position": [4, 0, 0],
+             "program": worker_prog("w2", default_worker_bins("w2"))},
+            {"label": "client", "position": [6, 0, 0], "collect": True,
+             "program": client_prog(client_test_body)},
+        ],
+    }
+
+    text = run_sim(spec)
+    print(text)
+    data = json.loads(text)
+    out = {n["label"]: n["output"] for n in data["nodes"]}
+    client_out = out.get("client", "")
+    print("==== client output ====")
+    print(client_out)
+
+    checks = [
+        ("connected", "connected to gateway" in client_out),
+        ("hello deployed", "deploy hello: true" in client_out),
+        ("hello running", "hello placed + running" in client_out),
+        ("greet via mesh routing", "greet: Hello, crab!!!" in client_out),
+        ("add via mesh routing", "add: 42" in client_out),
+    ]
+    if CALLER_WASM:
+        checks.append(("cross-module mesh call", "mesh: via mesh: Hello, mesh!" in client_out))
+    if GO_WASM:
+        checks.append(("Go reactor lane", "go greet: Hello from Go, gopher!!!" in client_out))
+    if SQLITE_WASM:
+        checks.append(("SQLite C lane + volume", '"rows":[["ferris"],["gopher"]]' in client_out
+                       and "sqlite bad sql errs: true" in client_out))
+    if JS_WASM:
+        checks.append(("JS command lane", "js greet: Hello from JS, quickjs!" in client_out))
+
+    failed = [name for name, ok in checks if not ok]
+    for name, ok in checks:
+        print(("PASS " if ok else "FAIL ") + name)
+    if failed:
+        sys.exit("E2E FAILED: " + ", ".join(failed))
+    print("E2E ALL PASS")
+
+
+if __name__ == "__main__":
+    main()

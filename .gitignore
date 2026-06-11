@@ -1,4 +1,5 @@
 target/
 *.o
+__pycache__/
 guest/sqlite-c/sqlite3.c
 .worktrees/
