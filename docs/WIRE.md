@@ -124,6 +124,9 @@ Three roles on one rednet protocol `"crabcraft"`:
   module. Each invoke runs `_start` with the request JSON on stdin; stdout is
   the reply JSON. No WIT/schema typing (schema request returns a stub); slower
   (boot per invoke) but ANY wasi binary works unmodified.
+- `kind = "job"`: run-to-completion (the k8s Jobs resource), optionally on a
+  cron schedule. A gateway-side concept built from the two kinds above -
+  workers never see it. Section 6.
 
 ### Messages (every request carries client-chosen `id`, echoed in replies;
 replies are `{id, ok=true, ...}` or `{id, ok=false, err}`; long operations may
@@ -133,12 +136,16 @@ client -> gateway:
 ```lua
 { id, type="deploy", name="hello", url="https://...wasm", kind="reactor",
   schema="<resolved-WIT json>" }            -- register desired state
+  -- kind="job" adds: module="command"|"reactor", body | func+params,
+  --                  schedule, retries, timeout, keep   (section 6)
 { id, type="remove", name }
 { id, type="list" }                         -- registry + placement + health
 { id, type="schema", name }                 -- the workload's schema JSON
 { id, type="invoke", name, func="crab:hello/greeter@0.1.0#greet",
   params=<binary string> }                  -- reactor kind
 { id, type="invoke", name, body="<json>" }  -- command kind
+{ id, type="run", name }                    -- queue a run of a job NOW
+{ id, type="job-logs", name }               -- a job's recent run history
 { id, type="ping" }
 ```
 
@@ -169,14 +176,34 @@ lists of scalars; no anchors/multi-doc):
 ```yaml
 name: hello
 wasm: https://example.com/hello.wasm     # fetched by the assigned worker
-kind: reactor                             # or: command
+kind: reactor                             # or: command | job
 schema: https://example.com/hello.json    # resolved-WIT JSON (reactor kind);
                                           # url or inline path on the client
 ```
 
+A job manifest (section 6) adds the run payload and policy:
+
+```yaml
+name: greet-job
+wasm: https://example.com/hello.wasm
+kind: job
+schema: https://example.com/hello.json    # required when func: is used
+func: greet                # typed run: one call on a reactor module ...
+args:                      # ... with these args (validated + encoded by crb)
+  name: crabcraft
+# body: '{"op":"dump"}'    # OR an untyped run: command module, body on stdin
+schedule: "*/5 * * * *"    # optional: cron (omit = one run at deploy)
+retries: 1                 # optional: per-run retry budget (default 0)
+timeout: 120               # optional: per-run seconds (default 600)
+keep-warm: true            # optional: hold the slot between runs (default false)
+```
+
 The client reads the manifest, fetches `schema` itself if it is a URL/path,
 and sends a single `deploy` message carrying the schema inline (workers never
-need wasm-tools).
+need wasm-tools). For `func:` jobs it also resolves the function address and
+encodes `args:` per section 1 at deploy time - bad schedules, unknown
+functions, and ill-typed args all fail the deploy, and the gateway never
+needs the codec.
 
 ## 5. Schema-driven clients (the factory)
 
@@ -184,3 +211,48 @@ Clients fetch the module's resolved-WIT JSON (`wasm-tools component wit
 --json`) via the `schema` request, then encode/decode values generically from
 it — no per-interface codegen. The JSON's `interfaces[].functions` +
 `types` tables drive both validation and the section-1 codec.
+
+## 6. Jobs and cron (run-to-completion)
+
+`kind = "job"` is the k8s Jobs resource: desired state is "this module RAN",
+not "this module is running". With `schedule:` it is the CronJob resource.
+Jobs are purely a control-plane concept — a run is an ordinary `assign`, then
+exactly one `invoke`, then a `drain`, so any worker version executes jobs
+unmodified.
+
+**The run payload** is one of:
+- `module = "command"`: a wasi command module; `body` goes to stdin, stdout is
+  the recorded output (`argv`/`body-file` knobs from the command kind apply).
+- `module = "reactor"`: one typed call — `func` (full address) with `params`
+  pre-encoded by the client at deploy time (section 4).
+
+**Run state machine** (gateway): `pending` (waiting for a free slot) ->
+`placing` (assigned; module fetching/transpiling) -> `running` (the run invoke
+is in flight) -> a history entry `{ n, ok, t, dur, tries, output | err }`. The
+gateway keeps the last 5 runs per job (outputs truncated at 4 KB) in
+`.crab_jobs`, so history survives gateway reboots; an IN-FLIGHT run does not —
+its leftover slot is detected and drained, and the run number is left as a
+gap. `list` rows for jobs carry `{ state, schedule, runs, ok, fail, skip,
+last }`; `job-logs` returns the full history.
+
+**Semantics** (v0, deliberately boring):
+- One run at a time per job (placements are keyed by name). A firing that
+  finds the previous run still active is SKIPPED and counted (`skip`) — k8s
+  `concurrencyPolicy: Forbid`.
+- An unscheduled job runs once at deploy (k8s: creating a Job runs it). `run`
+  queues another run any time, scheduled or not.
+- Failures (invoke error, per-run `timeout`, worker lost mid-run) consume the
+  `retries` budget with a fresh placement per attempt; the final failure is
+  recorded. Unschedulable runs wait in `pending` indefinitely (visible in
+  `list`); `remove` or a forced redeploy clears them.
+- `keep = true` (manifest `keep-warm`) holds the slot — and the transpiled
+  module — between successful runs instead of draining; for schedules too
+  fast to re-fetch/re-transpile each time. The cost: the slot stays occupied.
+- Schedules evaluate against REAL-WORLD UTC (`os.epoch("utc")`), not Minecraft
+  time. Grammar: 5-field vixie cron (`*` lists `a,b` ranges `a-b` steps `*/n
+  a-b/n a/n`, `jan-dec`/`sun-sat` names, dow `0|7` = sunday, dom+dow both
+  restricted = OR), the `@hourly @daily @midnight @weekly @monthly @yearly`
+  macros, or `@every <dur>` (`30s`, `5m`, `1h30m`; ~2 s resolution from the
+  gateway's cron tick). Minute schedules fire at most once per matching
+  minute. NO catch-up: firings due while the gateway is down are missed, and
+  `@every` re-phases from gateway boot.

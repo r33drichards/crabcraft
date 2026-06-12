@@ -824,7 +824,13 @@ function M.connect(gwname, opts)
   function C:list() return self:request({ type = "list" }) end
   function C:deploy(spec) return self:request({ type = "deploy", name = spec.name,
     url = spec.wasm or spec.url, kind = spec.kind, schema = spec.schema,
-    warm = spec.warm, force = spec.force, args = spec.args, body_file = spec.body_file }) end
+    warm = spec.warm, force = spec.force, args = spec.args, body_file = spec.body_file,
+    -- job kind (WIRE.md section 6); params must be pre-encoded for func jobs
+    module = spec.module, func = spec.func, params = spec.params, body = spec.body,
+    schedule = spec.schedule, retries = spec.retries, timeout = spec.timeout,
+    keep = spec.keep }) end
+  function C:run(name) return self:request({ type = "run", name = name }) end
+  function C:job_logs(name) return self:request({ type = "job-logs", name = name }) end
   function C:remove(name) return self:request({ type = "remove", name = name }) end
   function C:schema(name)
     local r = self:request({ type = "schema", name = name })
@@ -909,20 +915,147 @@ end
 return M
 
 end
+preload["cron"] = function(...)
+-- Cron schedules for crabcraft jobs (docs/WIRE.md section 6).
+-- The gateway evaluates schedules against real-world UTC; crb uses the same
+-- parser to reject bad schedules at deploy time. Grammar:
+--   "@every <dur>"        intervals: 30s, 5m, 1h30m, 2d (gateway tick = ~2s)
+--   "@hourly @daily @midnight @weekly @monthly @yearly @annually"
+--   "min hour dom mon dow"  vixie-cron subset: * lists a,b,c ranges a-b
+--                           steps */n a-b/n a/n  names jan-dec / sun-sat
+--                           dow 0 and 7 = sunday
+-- Vixie rule kept: when BOTH dom and dow are restricted, a time matches if
+-- EITHER matches. No seconds field, no L/W/# extensions, no catch-up.
+local M = {}
+
+local MACROS = {
+  ["@hourly"] = "0 * * * *", ["@daily"] = "0 0 * * *",
+  ["@midnight"] = "0 0 * * *", ["@weekly"] = "0 0 * * 0",
+  ["@monthly"] = "0 0 1 * *", ["@yearly"] = "0 0 1 1 *",
+  ["@annually"] = "0 0 1 1 *",
+}
+local MON = { jan = 1, feb = 2, mar = 3, apr = 4, may = 5, jun = 6,
+  jul = 7, aug = 8, sep = 9, oct = 10, nov = 11, dec = 12 }
+local DOW = { sun = 0, mon = 1, tue = 2, wed = 3, thu = 4, fri = 5, sat = 6 }
+local UNITS = { s = 1, m = 60, h = 3600, d = 86400 }
+
+local function parse_every(s)
+  local total, rest = 0, s
+  while #rest > 0 do
+    local n, u, tail = rest:match("^(%d+)([smhd])(.*)$")
+    if not n then return nil, "bad duration '" .. s .. "' (use e.g. 30s, 5m, 1h30m)" end
+    total = total + tonumber(n) * UNITS[u]
+    rest = tail
+  end
+  if total < 1 then return nil, "@every duration must be at least 1s" end
+  return total
+end
+
+local function field_value(tok, names, lo, hi)
+  local v = tonumber(tok) or (names and names[tok:lower()])
+  if type(v) ~= "number" or v % 1 ~= 0 or v < lo or v > hi then return nil end
+  return v
+end
+
+-- one field -> set {n=true}, or nil for "*" (matches anything).
+-- wrap: dow accepts 7 and stores it as 0 (both mean sunday).
+local function parse_field(field, lo, hi, names, wrap)
+  if field == "*" then return nil end
+  local top = wrap and hi + 1 or hi
+  local set = {}
+  for part in (field .. ","):gmatch("([^,]*),") do
+    local base, step = part:match("^(.-)/(%d+)$")
+    base = base or part
+    step = step and tonumber(step)
+    if step and step < 1 then return nil, "step must be >= 1 in '" .. part .. "'" end
+    local a, b
+    if base == "*" then
+      a, b = lo, hi
+    else
+      local x, y = base:match("^(.+)%-(.+)$")
+      if x then
+        a, b = field_value(x, names, lo, top), field_value(y, names, lo, top)
+      else
+        a = field_value(base, names, lo, top)
+        b = step and top or a -- vixie: "n/step" runs n..top
+      end
+      if not a or not b or a > b then return nil, "bad value '" .. part .. "'" end
+    end
+    for v = a, b, step or 1 do
+      set[wrap and v % (hi + 1) or v] = true
+    end
+  end
+  return set
+end
+
+-- parse(expr) -> { every = seconds } | { min, hour, dom, mon, dow } | nil, err
+-- (field sets are nil for "*"; match() treats nil as match-anything)
+function M.parse(expr)
+  if type(expr) ~= "string" then return nil, "schedule must be a string" end
+  local s = expr:match("^%s*(.-)%s*$")
+  local dur = s:match("^@every%s+(%S+)$")
+  if dur then
+    local secs, err = parse_every(dur)
+    if not secs then return nil, err end
+    return { every = secs }
+  end
+  s = MACROS[s:lower()] or s
+  if s:sub(1, 1) == "@" then return nil, "unknown macro '" .. expr .. "'" end
+  local f = {}
+  for tok in s:gmatch("%S+") do f[#f + 1] = tok end
+  if #f ~= 5 then
+    return nil, "cron schedule needs 5 fields (min hour dom mon dow), " ..
+      "@every <dur>, or a @macro - got '" .. expr .. "'"
+  end
+  local c, err = {}
+  c.min, err = parse_field(f[1], 0, 59)
+  if err then return nil, "minute: " .. err end
+  c.hour, err = parse_field(f[2], 0, 23)
+  if err then return nil, "hour: " .. err end
+  c.dom, err = parse_field(f[3], 1, 31)
+  if err then return nil, "day-of-month: " .. err end
+  c.mon, err = parse_field(f[4], 1, 12, MON)
+  if err then return nil, "month: " .. err end
+  c.dow, err = parse_field(f[5], 0, 6, DOW, true)
+  if err then return nil, "day-of-week: " .. err end
+  return c
+end
+
+local function hit(set, v) return set == nil or set[v] == true end
+
+-- match(parsed, tm): tm is an os.date("*t")-shaped table; pass os.date("!*t")
+-- for the UTC semantics the gateway uses. Interval schedules never time-match.
+function M.match(c, tm)
+  if c.every then return false end
+  if not (hit(c.min, tm.min) and hit(c.hour, tm.hour) and hit(c.mon, tm.month)) then
+    return false
+  end
+  local dow = (tm.wday - 1) % 7 -- lua wday 1=sunday -> cron 0=sunday
+  if c.dom and c.dow then return c.dom[tm.day] == true or c.dow[dow] == true end
+  return hit(c.dom, tm.day) and hit(c.dow, dow)
+end
+
+return M
+
+end
 -- crb — the crabcraft CLI.
 --   crb deploy <manifest.yml> [gateway]    declarative deploy (WIRE.md sec 4)
 --   crb ls [gateway]                       workloads + workers
 --   crb invoke <name> <func> [json] [gw]   call a function (args as JSON)
+--   crb run <job> / crb logs <job>         jobs: trigger a run / run history
 --   crb schema <name> [gateway]            print a workload's interface
 --   crb remove <name> [gateway]
--- Manifest:  name: hello / wasm: <url|file:path> / kind: reactor|command /
---            schema: <path-or-url to resolved-WIT json>   (reactor kind)
+-- Manifest:  name: hello / wasm: <url|file:path> / kind: reactor|command|job /
+--            schema: <path-or-url to resolved-WIT json>   (reactor + func jobs)
+--            jobs add: schedule/func/args/body/retries/timeout/keep-warm
+--            (WIRE.md section 6)
 if package and package.path then package.path = "host/?.lua;./?.lua;" .. package.path end
 local yaml = require("yaml")
 local json = require("json")
 local client = require("client")
 local schema_mod = require("schema")
 local cm = require("cmval")
+local cron = require("cron")
 
 local args = { ... }
 -- -g <gateway> may appear anywhere (no trailing positional: the CC shell
@@ -944,10 +1077,17 @@ if not cmd then
   print("  crb deploy <file.yml>")
   print("  crb ls | schema <name> | rm <name> | purge | update")
   print("  crb invoke <name> <func> [args...]   (-s <session> for session kinds)")
+  print("  crb run <job>                 (queue a run of a job now)")
+  print("  crb logs <job> [n]            (a job's recent run history)")
   print("  crb reset <name> [-s <session>]")
   print("  crb gen <name> [outfile]      (generate a typed Lua client)")
   print("  (-g <gateway> anywhere to pick a gateway)")
   return
+end
+
+local function utcnow()
+  if os.epoch then return math.floor(os.epoch("utc") / 1000) end
+  return os.time()
 end
 
 -- key=value tokens -> argument table; values coerce json-ish
@@ -986,15 +1126,70 @@ local function fetch(pathOrUrl)
   return assert(readfile(pathOrUrl), "file not found: " .. pathOrUrl)
 end
 
+-- resolve a (possibly short) function name against a loaded schema
+local function resolve_func(sc, fname)
+  if sc.functions[fname] then return fname end
+  local addr
+  for a in pairs(sc.functions) do
+    if a:match("#(.+)$") == fname then
+      if addr then return nil, "ambiguous function '" .. fname .. "' - use the full address" end
+      addr = a
+    end
+  end
+  if not addr then return nil, "no function '" .. fname .. "' in the schema" end
+  return addr
+end
+
+-- manifest args -> encoded params (same named/positional/single-record rules
+-- as the client factory; bad args fail HERE, at deploy time)
+local function encode_job_args(sc, addr, argtbl)
+  local f = sc.functions[addr]
+  argtbl = argtbl or {}
+  local values = {}
+  if #f.params == 1 and argtbl[f.params[1].name] == nil and argtbl[1] == nil then
+    values[1] = argtbl
+  else
+    for i, p in ipairs(f.params) do
+      if argtbl[p.name] ~= nil then values[i] = argtbl[p.name] else values[i] = argtbl[i] end
+    end
+  end
+  return cm.encode_params(sc.param_types(addr), values)
+end
+
 if cmd == "deploy" then
   local file = assert(args[2], "crb deploy <file.yml>")
   local m = yaml.decode(assert(readfile(file), "manifest not found: " .. file))
   assert(m.name and (m.wasm or m.url), "manifest needs name + wasm")
   local spec = { name = m.name, wasm = m.wasm or m.url, kind = m.kind or "reactor", warm = m.warm, force = m.force, args = m.args, body_file = m["body-file"] }
   if m.schema then spec.schema = fetch(m.schema) end
+  assert(m.schedule == nil or spec.kind == "job", "manifest: schedule needs kind: job")
+  if spec.kind == "job" then
+    if m.schedule then
+      local parsed, perr = cron.parse(tostring(m.schedule))
+      assert(parsed, "manifest schedule: " .. tostring(perr))
+      spec.schedule = tostring(m.schedule)
+    end
+    spec.retries, spec.timeout, spec.keep = m.retries, m.timeout, m["keep-warm"]
+    if m.func then
+      -- a typed run: one function call on a reactor module, args encoded now
+      spec.module = "reactor"
+      assert(spec.schema, "manifest: a func job needs schema: to encode args")
+      local sc = schema_mod.load(spec.schema)
+      local addr, ferr = resolve_func(sc, m.func)
+      assert(addr, "manifest func: " .. tostring(ferr))
+      spec.func = addr
+      spec.params = encode_job_args(sc, addr, m.args)
+      spec.args = nil -- consumed as function args (argv is for command modules)
+    else
+      -- a command run: any wasi CLI, body on stdin (plus argv/body-file knobs)
+      spec.module = "command"
+      spec.body = m.body ~= nil and tostring(m.body) or nil
+    end
+  end
   local C = client.connect(GW)
   local r = C:deploy(spec)
-  print(r.ok and ("deployed '" .. m.name .. "' (" .. spec.kind .. ")") or ("FAILED: " .. tostring(r.err)))
+  print(r.ok and (r.output or ("deployed '" .. m.name .. "' (" .. spec.kind .. ")"))
+    or ("FAILED: " .. tostring(r.err)))
 
 elseif cmd == "ls" then
   local C = client.connect(GW)
@@ -1002,8 +1197,17 @@ elseif cmd == "ls" then
   if not r.ok then print("FAILED: " .. tostring(r.err)) return end
   print("WORKLOADS")
   for _, w in ipairs(r.workloads or {}) do
-    print(("  %-12s %-8s %-9s worker=%s slot=%s"):format(w.name, w.kind or "?",
-      w.state or "?", tostring(w.worker), tostring(w.slot)))
+    if w.kind == "job" then
+      local last = "no runs"
+      if w.last and w.last.t then
+        last = (w.last.ok and "ok " or "ERR ") .. (utcnow() - w.last.t) .. "s ago"
+      end
+      print(("  %-12s %-8s %-9s runs=%-3d %s%s"):format(w.name, w.kind, w.state or "?",
+        w.runs or 0, w.schedule and (w.schedule .. "  ") or "", last))
+    else
+      print(("  %-12s %-8s %-9s worker=%s slot=%s"):format(w.name, w.kind or "?",
+        w.state or "?", tostring(w.worker), tostring(w.slot)))
+    end
   end
   print("WORKERS")
   for _, w in ipairs(r.workers or {}) do
@@ -1016,6 +1220,7 @@ elseif cmd == "schema" then
   local C = client.connect(GW)
   local sjson, err, kind = C:schema(name)
   if kind == "command" or kind == "session" then print(name .. ": " .. kind .. " kind (body in -> output out)") return end
+  if kind == "job" and not sjson then print(name .. ": job (command module; body in -> output out)") return end
   if not sjson then print("FAILED: " .. tostring(err)) return end
   local sc = schema_mod.load(sjson)
   for _, addr in ipairs(sc.list()) do
@@ -1150,6 +1355,51 @@ elseif cmd == "gen" then
   if type(fs) == "table" and fs.open then h = fs.open(outfile, "w") h.write(table.concat(out, "\n")) h.close()
   else local f2 = assert(io.open(outfile, "w")) f2:write(table.concat(out, "\n")) f2:close() end
   print(("wrote %s (%d lines) - require(%q)"):format(outfile, #out, (outfile:gsub("%.lua$", ""))))
+
+elseif cmd == "run" then
+  -- crb run <job>: queue a run now (works for scheduled jobs too, like
+  -- `kubectl create job --from=cronjob/x`)
+  local name = assert(args[2], "crb run <job>")
+  local C = client.connect(GW)
+  local r = C:run(name)
+  print(r.ok and r.output or ("FAILED: " .. tostring(r.err)))
+
+elseif cmd == "logs" then
+  -- crb logs <job> [n]: the last n completed runs (default all kept), oldest
+  -- first; func-job outputs are decoded through the schema
+  local name = assert(args[2], "crb logs <job> [n]")
+  local C = client.connect(GW)
+  local r = C:job_logs(name)
+  if not r.ok then print("FAILED: " .. tostring(r.err)) return end
+  local runs = r.runs or {}
+  local from = tonumber(args[3]) and math.max(1, #runs - tonumber(args[3]) + 1) or 1
+  local rdesc
+  if r.module == "reactor" and r.func then
+    local sjson = C:schema(name)
+    if sjson then
+      local okl, sc = pcall(schema_mod.load, sjson)
+      if okl and sc.functions[r.func] then rdesc = sc.functions[r.func].result end
+    end
+  end
+  for i = from, #runs do
+    local e = runs[i]
+    print(("run #%d  %-6s %ss ago%s%s"):format(e.n, e.ok and "ok" or "FAILED",
+      e.t and (utcnow() - e.t) or "?",
+      e.dur and ("  %.1fs"):format(e.dur) or "",
+      (e.tries or 0) > 0 and ("  retries=" .. e.tries) or ""))
+    if e.ok then
+      local out = e.output
+      if rdesc and out then
+        local okd, v = pcall(cm.decode, rdesc, out)
+        if okd then out = type(v) == "table" and json.encode(v) or tostring(v) end
+      end
+      if out ~= nil and #tostring(out) > 0 then print("  " .. tostring(out)) end
+    else
+      print("  " .. tostring(e.err))
+    end
+  end
+  if #runs == 0 then print("no completed runs") end
+  if r.cur then print(("(run #%d %s)"):format(r.cur.n, r.cur.phase)) end
 
 elseif cmd == "remove" or cmd == "rm" or cmd == "del" or cmd == "delete" then
   local C = client.connect(GW)

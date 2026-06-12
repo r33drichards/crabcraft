@@ -23,7 +23,7 @@ def lua_str(s):
 
 # ---- files every node may need ------------------------------------------------
 HOST_LIBS = {n: slurp(f"host/{n}.lua") for n in
-             ["json", "cmval", "schema", "yaml", "runtime", "client", "worker", "gateway"]}
+             ["json", "cmval", "schema", "yaml", "runtime", "client", "worker", "gateway", "cron"]}
 BUNDLE = slurp(os.path.expanduser("~/wasmcraft/dist/wasmcraft.lua"))
 HELLO_WASM = slurp("modules/hello.wasm", binary=True)
 # Deployed schemas for crabgen-managed guests come from their gen/ trees —
@@ -101,7 +101,7 @@ def amalgamate(body, libs):
 gateway_prog = f"""periphemu.create('back','modem',NET,true)
 rednet.open('back')
 os.setComputerLabel('gw')
-do local h = fs.open('gateway', 'w') h.write({lua_str(PRELUDE + HOST_LIBS["gateway"])}) h.close() end
+do local h = fs.open('gateway', 'w') h.write({lua_str(amalgamate(HOST_LIBS["gateway"], {"cron": HOST_LIBS["cron"]}))}) h.close() end
 emit('gateway: starting')
 local fn, lerr = loadfile('gateway')
 if not fn then emit('gateway PARSE: ' .. tostring(lerr)) return end
@@ -203,6 +203,47 @@ emit('cpp greet: ' .. tostring(hcpp.greet({{ name = 'ferris', excited = true }})
 emit('cpp add: ' .. tostring(hcpp.add({{ a = 20, b = 3 }})))
 """
 
+jobs_test = f"""
+-- JOBS (k8s Jobs; WIRE.md sec 6): run-to-completion on the same machinery.
+-- A func job runs one typed call on a reactor module; params are encoded by
+-- the client at deploy time (here, exactly what crb does with a manifest).
+local cmv = require('cmval')
+local jsc = require('schema').load({lua_str(HELLO_SCHEMA)})
+local gaddr
+for a in pairs(jsc.functions) do if a:match('#(.+)$') == 'greet' then gaddr = a end end
+local jparams = cmv.encode_params(jsc.param_types(gaddr), {{ {{ name = 'batch', excited = true }} }})
+r = C:deploy({{ name = 'greet-job', wasm = 'file:hello.wasm', kind = 'job',
+  module = 'reactor', schema = {lua_str(HELLO_SCHEMA)}, func = gaddr, params = jparams }})
+emit('deploy job: ' .. tostring(r.ok) .. ' / ' .. tostring(r.output or r.err))
+local function wait_runs(jname, minruns)
+  for i = 1, 45 do
+    local l = C:job_logs(jname)
+    if l.ok and #(l.runs or {{}}) >= minruns then return l end
+    sleep(2)
+  end
+  error('job never reached ' .. minruns .. ' run(s): ' .. jname)
+end
+local jl = wait_runs('greet-job', 1)
+local jr = jl.runs[#jl.runs]
+local jout = jr.ok and cmv.decode(jsc.functions[gaddr].result, jr.output or '') or jr.err
+emit('job run: ' .. tostring(jr.ok) .. ' ' .. tostring(jout))
+-- a one-shot job stays done: trigger run #2 manually
+r = C:run('greet-job')
+emit('job rerun: ' .. tostring(r.ok))
+jl = wait_runs('greet-job', 2)
+emit('job rerun done: ' .. tostring(jl.runs[#jl.runs].ok))
+-- CRON: a scheduled job fires by itself; keep-warm so the placement (and its
+-- transpile) is reused between runs
+r = C:deploy({{ name = 'tick-job', wasm = 'file:hello.wasm', kind = 'job',
+  module = 'reactor', schema = {lua_str(HELLO_SCHEMA)}, func = gaddr, params = jparams,
+  schedule = '@every 5s', keep = true }})
+emit('deploy cron job: ' .. tostring(r.ok) .. ' / ' .. tostring(r.output or r.err))
+local cl = wait_runs('tick-job', 2)
+emit('cron job fired: ' .. tostring(cl.runs[1].ok == true and cl.runs[2].ok == true))
+r = C:remove('tick-job')
+emit('cron job removed: ' .. tostring(r.ok))
+"""
+
 ts_test = ""
 if TS_WASM:
     ts_test = f"""
@@ -251,6 +292,7 @@ emit('add: ' .. tostring(hello.add({{ a = 40, b = 2 }})))
 {go_test}
 {cpp_test}
 {ts_test}
+{jobs_test}
 -- cluster state for the record
 local l = C:list()
 for _, w in ipairs(l.workloads or {{}}) do
@@ -345,6 +387,10 @@ def main():
         ("hello running", "hello placed + running" in client_out),
         ("greet via mesh routing", "greet: Hello, crab!!!" in client_out),
         ("add via mesh routing", "add: 42" in client_out),
+        ("job runs to completion", "job run: true Hello, batch!!!" in client_out),
+        ("job manual rerun", "job rerun: true" in client_out
+         and "job rerun done: true" in client_out),
+        ("cron job fires on schedule", "cron job fired: true" in client_out),
     ]
     if CALLER_WASM:
         checks.append(("cross-module mesh call", "mesh: via mesh: Hello, mesh!" in client_out))

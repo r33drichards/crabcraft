@@ -2,16 +2,20 @@
 --   crb deploy <manifest.yml> [gateway]    declarative deploy (WIRE.md sec 4)
 --   crb ls [gateway]                       workloads + workers
 --   crb invoke <name> <func> [json] [gw]   call a function (args as JSON)
+--   crb run <job> / crb logs <job>         jobs: trigger a run / run history
 --   crb schema <name> [gateway]            print a workload's interface
 --   crb remove <name> [gateway]
--- Manifest:  name: hello / wasm: <url|file:path> / kind: reactor|command /
---            schema: <path-or-url to resolved-WIT json>   (reactor kind)
+-- Manifest:  name: hello / wasm: <url|file:path> / kind: reactor|command|job /
+--            schema: <path-or-url to resolved-WIT json>   (reactor + func jobs)
+--            jobs add: schedule/func/args/body/retries/timeout/keep-warm
+--            (WIRE.md section 6)
 if package and package.path then package.path = "host/?.lua;./?.lua;" .. package.path end
 local yaml = require("yaml")
 local json = require("json")
 local client = require("client")
 local schema_mod = require("schema")
 local cm = require("cmval")
+local cron = require("cron")
 
 local args = { ... }
 -- -g <gateway> may appear anywhere (no trailing positional: the CC shell
@@ -33,10 +37,17 @@ if not cmd then
   print("  crb deploy <file.yml>")
   print("  crb ls | schema <name> | rm <name> | purge | update")
   print("  crb invoke <name> <func> [args...]   (-s <session> for session kinds)")
+  print("  crb run <job>                 (queue a run of a job now)")
+  print("  crb logs <job> [n]            (a job's recent run history)")
   print("  crb reset <name> [-s <session>]")
   print("  crb gen <name> [outfile]      (generate a typed Lua client)")
   print("  (-g <gateway> anywhere to pick a gateway)")
   return
+end
+
+local function utcnow()
+  if os.epoch then return math.floor(os.epoch("utc") / 1000) end
+  return os.time()
 end
 
 -- key=value tokens -> argument table; values coerce json-ish
@@ -75,15 +86,70 @@ local function fetch(pathOrUrl)
   return assert(readfile(pathOrUrl), "file not found: " .. pathOrUrl)
 end
 
+-- resolve a (possibly short) function name against a loaded schema
+local function resolve_func(sc, fname)
+  if sc.functions[fname] then return fname end
+  local addr
+  for a in pairs(sc.functions) do
+    if a:match("#(.+)$") == fname then
+      if addr then return nil, "ambiguous function '" .. fname .. "' - use the full address" end
+      addr = a
+    end
+  end
+  if not addr then return nil, "no function '" .. fname .. "' in the schema" end
+  return addr
+end
+
+-- manifest args -> encoded params (same named/positional/single-record rules
+-- as the client factory; bad args fail HERE, at deploy time)
+local function encode_job_args(sc, addr, argtbl)
+  local f = sc.functions[addr]
+  argtbl = argtbl or {}
+  local values = {}
+  if #f.params == 1 and argtbl[f.params[1].name] == nil and argtbl[1] == nil then
+    values[1] = argtbl
+  else
+    for i, p in ipairs(f.params) do
+      if argtbl[p.name] ~= nil then values[i] = argtbl[p.name] else values[i] = argtbl[i] end
+    end
+  end
+  return cm.encode_params(sc.param_types(addr), values)
+end
+
 if cmd == "deploy" then
   local file = assert(args[2], "crb deploy <file.yml>")
   local m = yaml.decode(assert(readfile(file), "manifest not found: " .. file))
   assert(m.name and (m.wasm or m.url), "manifest needs name + wasm")
   local spec = { name = m.name, wasm = m.wasm or m.url, kind = m.kind or "reactor", warm = m.warm, force = m.force, args = m.args, body_file = m["body-file"] }
   if m.schema then spec.schema = fetch(m.schema) end
+  assert(m.schedule == nil or spec.kind == "job", "manifest: schedule needs kind: job")
+  if spec.kind == "job" then
+    if m.schedule then
+      local parsed, perr = cron.parse(tostring(m.schedule))
+      assert(parsed, "manifest schedule: " .. tostring(perr))
+      spec.schedule = tostring(m.schedule)
+    end
+    spec.retries, spec.timeout, spec.keep = m.retries, m.timeout, m["keep-warm"]
+    if m.func then
+      -- a typed run: one function call on a reactor module, args encoded now
+      spec.module = "reactor"
+      assert(spec.schema, "manifest: a func job needs schema: to encode args")
+      local sc = schema_mod.load(spec.schema)
+      local addr, ferr = resolve_func(sc, m.func)
+      assert(addr, "manifest func: " .. tostring(ferr))
+      spec.func = addr
+      spec.params = encode_job_args(sc, addr, m.args)
+      spec.args = nil -- consumed as function args (argv is for command modules)
+    else
+      -- a command run: any wasi CLI, body on stdin (plus argv/body-file knobs)
+      spec.module = "command"
+      spec.body = m.body ~= nil and tostring(m.body) or nil
+    end
+  end
   local C = client.connect(GW)
   local r = C:deploy(spec)
-  print(r.ok and ("deployed '" .. m.name .. "' (" .. spec.kind .. ")") or ("FAILED: " .. tostring(r.err)))
+  print(r.ok and (r.output or ("deployed '" .. m.name .. "' (" .. spec.kind .. ")"))
+    or ("FAILED: " .. tostring(r.err)))
 
 elseif cmd == "ls" then
   local C = client.connect(GW)
@@ -91,8 +157,17 @@ elseif cmd == "ls" then
   if not r.ok then print("FAILED: " .. tostring(r.err)) return end
   print("WORKLOADS")
   for _, w in ipairs(r.workloads or {}) do
-    print(("  %-12s %-8s %-9s worker=%s slot=%s"):format(w.name, w.kind or "?",
-      w.state or "?", tostring(w.worker), tostring(w.slot)))
+    if w.kind == "job" then
+      local last = "no runs"
+      if w.last and w.last.t then
+        last = (w.last.ok and "ok " or "ERR ") .. (utcnow() - w.last.t) .. "s ago"
+      end
+      print(("  %-12s %-8s %-9s runs=%-3d %s%s"):format(w.name, w.kind, w.state or "?",
+        w.runs or 0, w.schedule and (w.schedule .. "  ") or "", last))
+    else
+      print(("  %-12s %-8s %-9s worker=%s slot=%s"):format(w.name, w.kind or "?",
+        w.state or "?", tostring(w.worker), tostring(w.slot)))
+    end
   end
   print("WORKERS")
   for _, w in ipairs(r.workers or {}) do
@@ -105,6 +180,7 @@ elseif cmd == "schema" then
   local C = client.connect(GW)
   local sjson, err, kind = C:schema(name)
   if kind == "command" or kind == "session" then print(name .. ": " .. kind .. " kind (body in -> output out)") return end
+  if kind == "job" and not sjson then print(name .. ": job (command module; body in -> output out)") return end
   if not sjson then print("FAILED: " .. tostring(err)) return end
   local sc = schema_mod.load(sjson)
   for _, addr in ipairs(sc.list()) do
@@ -239,6 +315,51 @@ elseif cmd == "gen" then
   if type(fs) == "table" and fs.open then h = fs.open(outfile, "w") h.write(table.concat(out, "\n")) h.close()
   else local f2 = assert(io.open(outfile, "w")) f2:write(table.concat(out, "\n")) f2:close() end
   print(("wrote %s (%d lines) - require(%q)"):format(outfile, #out, (outfile:gsub("%.lua$", ""))))
+
+elseif cmd == "run" then
+  -- crb run <job>: queue a run now (works for scheduled jobs too, like
+  -- `kubectl create job --from=cronjob/x`)
+  local name = assert(args[2], "crb run <job>")
+  local C = client.connect(GW)
+  local r = C:run(name)
+  print(r.ok and r.output or ("FAILED: " .. tostring(r.err)))
+
+elseif cmd == "logs" then
+  -- crb logs <job> [n]: the last n completed runs (default all kept), oldest
+  -- first; func-job outputs are decoded through the schema
+  local name = assert(args[2], "crb logs <job> [n]")
+  local C = client.connect(GW)
+  local r = C:job_logs(name)
+  if not r.ok then print("FAILED: " .. tostring(r.err)) return end
+  local runs = r.runs or {}
+  local from = tonumber(args[3]) and math.max(1, #runs - tonumber(args[3]) + 1) or 1
+  local rdesc
+  if r.module == "reactor" and r.func then
+    local sjson = C:schema(name)
+    if sjson then
+      local okl, sc = pcall(schema_mod.load, sjson)
+      if okl and sc.functions[r.func] then rdesc = sc.functions[r.func].result end
+    end
+  end
+  for i = from, #runs do
+    local e = runs[i]
+    print(("run #%d  %-6s %ss ago%s%s"):format(e.n, e.ok and "ok" or "FAILED",
+      e.t and (utcnow() - e.t) or "?",
+      e.dur and ("  %.1fs"):format(e.dur) or "",
+      (e.tries or 0) > 0 and ("  retries=" .. e.tries) or ""))
+    if e.ok then
+      local out = e.output
+      if rdesc and out then
+        local okd, v = pcall(cm.decode, rdesc, out)
+        if okd then out = type(v) == "table" and json.encode(v) or tostring(v) end
+      end
+      if out ~= nil and #tostring(out) > 0 then print("  " .. tostring(out)) end
+    else
+      print("  " .. tostring(e.err))
+    end
+  end
+  if #runs == 0 then print("no completed runs") end
+  if r.cur then print(("(run #%d %s)"):format(r.cur.n, r.cur.phase)) end
 
 elseif cmd == "remove" or cmd == "rm" or cmd == "del" or cmd == "delete" then
   local C = client.connect(GW)

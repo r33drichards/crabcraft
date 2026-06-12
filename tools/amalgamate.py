@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Produce dist/: self-contained in-game programs (no separate lib files).
 
-dist/gateway.lua  - standalone control plane (no deps)
+dist/gateway.lua  - control plane + inlined cron lib
 dist/worker.lua   - worker + inlined libs + wasmcraft-bundle self-bootstrap
-dist/crb.lua      - CLI + inlined libs (client factory, codec, yaml, json)
+dist/crb.lua      - CLI + inlined libs (client factory, codec, yaml, json, cron)
 """
 import json, os
 
@@ -24,7 +24,7 @@ def stamp(src):
     return src.replace('local CRAB_VERSION = "dev"', f'local CRAB_VERSION = "{VERSION}"')
 
 LIBS = {n: slurp(f"host/{n}.lua") for n in
-        ["json", "cmval", "schema", "yaml", "runtime", "client"]}
+        ["json", "cmval", "schema", "yaml", "runtime", "client", "cron"]}
 
 def amalgamate(body, libnames, header):
     parts = [header,
@@ -60,9 +60,10 @@ end
 
 os.makedirs("dist", exist_ok=True)
 
-# gateway: standalone already
+# gateway: just the cron lib
 with open("dist/gateway.lua", "w") as f:
-    f.write("-- crabcraft gateway (amalgamated; see host/gateway.lua)\n" + stamp(slurp("host/gateway.lua")))
+    f.write(amalgamate(stamp(slurp("host/gateway.lua")), ["cron"],
+                       "-- crabcraft gateway (amalgamated; see host/gateway.lua)\n"))
 
 # worker: libs + engine bootstrap
 with open("dist/worker.lua", "w") as f:
@@ -73,7 +74,7 @@ with open("dist/worker.lua", "w") as f:
 # crb: libs only (no engine needed on the client)
 with open("dist/crb.lua", "w") as f:
     f.write(amalgamate(slurp("host/crb.lua"),
-                       ["json", "cmval", "schema", "yaml", "client"],
+                       ["json", "cmval", "schema", "yaml", "client", "cron"],
                        "-- crb: the crabcraft CLI (amalgamated; see host/)\n"))
 
 # crblib: the client runtime as a requireable module (generated clients
@@ -81,8 +82,9 @@ with open("dist/crb.lua", "w") as f:
 with open("dist/crblib.lua", "w") as f:
     f.write(amalgamate(
         'return { client = require("client"), json = require("json"), '
-        'cmval = require("cmval"), schema = require("schema"), yaml = require("yaml") }',
-        ["json", "cmval", "schema", "yaml", "client"],
+        'cmval = require("cmval"), schema = require("schema"), yaml = require("yaml"), '
+        'cron = require("cron") }',
+        ["json", "cmval", "schema", "yaml", "client", "cron"],
         "-- crblib: crabcraft client runtime (amalgamated; see host/)\n"))
 
 for p in ["dist/gateway.lua", "dist/worker.lua", "dist/crb.lua", "dist/crblib.lua"]:
