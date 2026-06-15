@@ -24,7 +24,10 @@ jobs:
           mkdir -p out
           cp dist/gateway.lua dist/worker.lua dist/crb.lua out/
           cp dist/crblib.lua dist/cardlib.lua out/
-          cp demo/cardlock.lua out/
+          cp demo/cardlock.lua demo/cardui.lua demo/cardui_core.lua out/
+          # cardui kiosk page + React bundle (committed build artifact)
+          cp web/cardui/cardui.html out/cardui.html
+          cp web/site/cardapp.js out/cardapp.js
           cp modules/*.wasm out/
           cp wit/*.json out/
           # crabgen-managed guests: schemas ship from their gen/ trees (the
