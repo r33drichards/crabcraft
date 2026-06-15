@@ -23,6 +23,8 @@ jobs:
           python3 tools/amalgamate.py
           mkdir -p out
           cp dist/gateway.lua dist/worker.lua dist/crb.lua out/
+          cp dist/crblib.lua dist/cardlib.lua out/
+          cp demo/cardlock.lua out/
           cp modules/*.wasm out/
           cp wit/*.json out/
           # crabgen-managed guests: schemas ship from their gen/ trees (the

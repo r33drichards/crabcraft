@@ -30,15 +30,20 @@ pub trait AuthImpl {
     /// An Err return encodes as the WIT result err case (a normal status-0 reply).
     fn init(&self, store: String) -> Result<(), String>;
 
-    /// Handles crab:auth/accounts@0.1.0#enroll-card.
+    /// Handles crab:auth/accounts@0.1.0#register.
     ///
     /// An Err return encodes as the WIT result err case (a normal status-0 reply).
-    fn enroll_card(&self, store: String, username: String, card_id: String, card_secret: String, meta: String) -> Result<(), String>;
+    fn register(&self, store: String, username: String, meta: String) -> Result<String, String>;
 
-    /// Handles crab:auth/accounts@0.1.0#login-card.
+    /// Handles crab:auth/accounts@0.1.0#sign.
     ///
     /// An Err return encodes as the WIT result err case (a normal status-0 reply).
-    fn login_card(&self, store: String, card_id: String, card_secret: String) -> Result<String, String>;
+    fn sign(&self, private_key: String, nonce: String) -> Result<String, String>;
+
+    /// Handles crab:auth/accounts@0.1.0#verify.
+    ///
+    /// An Err return encodes as the WIT result err case (a normal status-0 reply).
+    fn verify(&self, store: String, user_id: String, nonce: String, signature: String) -> Result<String, String>;
 }
 
 /// Registers every exported function: the WIRE type trees of its params
@@ -53,24 +58,31 @@ pub fn setup(r: &mut Registry) {
         handle_init,
     );
     r.register(
-        "crab:auth/accounts@0.1.0#enroll-card",
+        "crab:auth/accounts@0.1.0#register",
         vec![
             Type::String,
             Type::String,
             Type::String,
-            Type::String,
-            Type::String,
         ],
-        handle_enroll_card,
+        handle_register,
     );
     r.register(
-        "crab:auth/accounts@0.1.0#login-card",
+        "crab:auth/accounts@0.1.0#sign",
+        vec![
+            Type::String,
+            Type::String,
+        ],
+        handle_sign,
+    );
+    r.register(
+        "crab:auth/accounts@0.1.0#verify",
         vec![
             Type::String,
             Type::String,
             Type::String,
+            Type::String,
         ],
-        handle_login_card,
+        handle_verify,
     );
 }
 
@@ -84,27 +96,37 @@ fn handle_init(args: Vec<Value>) -> Result<Value, String> {
     }
 }
 
-/// Adapter for crab:auth/accounts@0.1.0#enroll-card; registered in setup().
-fn handle_enroll_card(args: Vec<Value>) -> Result<Value, String> {
+/// Adapter for crab:auth/accounts@0.1.0#register; registered in setup().
+fn handle_register(args: Vec<Value>) -> Result<Value, String> {
     let mut args = args.into_iter();
     let store = String::try_from(args.next().ok_or("missing param `store`")?)?;
     let username = String::try_from(args.next().ok_or("missing param `username`")?)?;
-    let card_id = String::try_from(args.next().ok_or("missing param `card-id`")?)?;
-    let card_secret = String::try_from(args.next().ok_or("missing param `card-secret`")?)?;
     let meta = String::try_from(args.next().ok_or("missing param `meta`")?)?;
-    match crate::app::App.enroll_card(store, username, card_id, card_secret, meta) {
-        Ok(()) => Ok(Value::Result(Ok(None))),
+    match crate::app::App.register(store, username, meta) {
+        Ok(r) => Ok(Value::Result(Ok(Some(Box::new(Value::String(r)))))),
         Err(e) => Ok(Value::Result(Err(Some(Box::new(Value::String(e)))))),
     }
 }
 
-/// Adapter for crab:auth/accounts@0.1.0#login-card; registered in setup().
-fn handle_login_card(args: Vec<Value>) -> Result<Value, String> {
+/// Adapter for crab:auth/accounts@0.1.0#sign; registered in setup().
+fn handle_sign(args: Vec<Value>) -> Result<Value, String> {
+    let mut args = args.into_iter();
+    let private_key = String::try_from(args.next().ok_or("missing param `private-key`")?)?;
+    let nonce = String::try_from(args.next().ok_or("missing param `nonce`")?)?;
+    match crate::app::App.sign(private_key, nonce) {
+        Ok(r) => Ok(Value::Result(Ok(Some(Box::new(Value::String(r)))))),
+        Err(e) => Ok(Value::Result(Err(Some(Box::new(Value::String(e)))))),
+    }
+}
+
+/// Adapter for crab:auth/accounts@0.1.0#verify; registered in setup().
+fn handle_verify(args: Vec<Value>) -> Result<Value, String> {
     let mut args = args.into_iter();
     let store = String::try_from(args.next().ok_or("missing param `store`")?)?;
-    let card_id = String::try_from(args.next().ok_or("missing param `card-id`")?)?;
-    let card_secret = String::try_from(args.next().ok_or("missing param `card-secret`")?)?;
-    match crate::app::App.login_card(store, card_id, card_secret) {
+    let user_id = String::try_from(args.next().ok_or("missing param `user-id`")?)?;
+    let nonce = String::try_from(args.next().ok_or("missing param `nonce`")?)?;
+    let signature = String::try_from(args.next().ok_or("missing param `signature`")?)?;
+    match crate::app::App.verify(store, user_id, nonce, signature) {
         Ok(r) => Ok(Value::Result(Ok(Some(Box::new(Value::String(r)))))),
         Err(e) => Ok(Value::Result(Err(Some(Box::new(Value::String(e)))))),
     }

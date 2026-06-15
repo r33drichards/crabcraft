@@ -1,47 +1,47 @@
--- cardlock: crabcraft demo - a floppy-disk "NFC card" reader backed by the
--- `auth` workload (argon2) + a sqlite workload (storage). A floppy IS the card:
--- its disk id is the card id, and a random key file on it (auth.key) is the
--- secret. Insert a card to log in; the secret is argon2id-verified server-side
--- and never stored in the clear.
+-- cardlock: crabcraft public-key door. A ComputerCraft floppy is the "card"
+-- and carries an Ed25519 PRIVATE key; the `auth` workload stores only the
+-- matching PUBLIC key. Login is challenge-response: the reader makes a fresh
+-- nonce, signs it LOCALLY with the floppy's key (so the key never leaves the
+-- turtle), and asks `auth.verify` to check it against the stored public key.
 --
 --   wget https://github.com/r33drichards/crabcraft/releases/latest/download/cardlock.lua cardlock
---   cardlock init                      -- create the users table (once)
---   cardlock enroll alice {"role":"admin"}   -- then insert a blank floppy
---   cardlock                           -- reader/door mode: tap a card to unlock
+--   cardlock init                         -- create the users table (once)
+--   cardlock enroll alice {"role":"admin"}  -- register + write a fresh card
+--   cardlock                              -- door mode: tap a card to unlock
 --
--- Hardware: a computer + wireless modem (to reach the gateway) + a disk drive.
--- In door mode it pulses redstone on the configured side when a card is valid.
-local LIBURL = "https://github.com/r33drichards/crabcraft/releases/latest/download/crblib.lua"
+-- enroll/init are thin (client only). Door mode also runs the wasmcraft engine
+-- locally to sign, so a reader turtle needs: a wireless modem (reach gateway),
+-- a disk drive, and enough room for the engine + auth.wasm (fetched on first run).
+local LIBURL = "https://github.com/r33drichards/crabcraft/releases/latest/download/cardlib.lua"
+local AUTHWASM_URL = "https://github.com/r33drichards/crabcraft/releases/latest/download/auth.wasm"
 
-local STORE = "sqlite"        -- name of the sqlite workload holding the users
-local AUTH = "auth"           -- name of the auth workload
-local KEYFILE = "auth.key"    -- secret file written on the card (the floppy)
+local STORE = "sqlite"        -- sqlite workload holding the users table
+local AUTH = "auth"           -- the auth workload (for verify over the mesh)
+local CARDFILE = "card.json"  -- {user_id, private_key} written on the floppy
 local DOOR_SIDE = "back"      -- redstone side pulsed on a successful login
+local A = "crab:auth/accounts@0.1.0#"
 
--- ---- bootstrap the client runtime (same pattern as demo/pets.lua) ----------
-if not fs.exists("crblib") then
-  io.write("fetching crblib ... ")
-  local r = assert(http.get(LIBURL), "cannot fetch crblib")
-  local h = fs.open("crblib", "w") h.write(r.readAll()) h.close() r.close()
+-- ---- bootstrap the card-reader runtime (client + local wasm engine) --------
+if not fs.exists("cardlib") then
+  io.write("fetching cardlib ... ")
+  local r = assert(http.get(LIBURL), "cannot fetch cardlib")
+  local h = fs.open("cardlib", "w") h.write(r.readAll()) h.close() r.close()
   print("ok")
 end
-local lib = dofile("crblib")
+local lib = dofile("cardlib")
 local C = lib.client.connect()
 local auth = C:workload(AUTH)
 
--- typed proxy calls keep the WIT kebab names for functions AND params.
+-- ---- thin (client-only) operations -----------------------------------------
 local function init()
   return auth["init"]({ store = STORE })
 end
-local function enroll(username, card_id, secret, meta)
-  return auth["enroll-card"]({
-    store = STORE, username = username,
-    ["card-id"] = card_id, ["card-secret"] = secret, meta = meta or "{}",
-  })
+local function register(username, meta)
+  return auth["register"]({ store = STORE, username = username, meta = meta or "{}" })
 end
-local function login(card_id, secret)
-  return auth["login-card"]({
-    store = STORE, ["card-id"] = card_id, ["card-secret"] = secret,
+local function verify(user_id, nonce, signature)
+  return auth["verify"]({
+    store = STORE, ["user-id"] = user_id, nonce = nonce, signature = signature,
   })
 end
 
@@ -53,39 +53,54 @@ local function find_disk()
     end
   end
 end
-
 local function wait_for_card(prompt)
   local side = find_disk()
   if side then return side end
   print(prompt or "insert a card (floppy) ...")
-  while true do
-    os.pullEvent("disk")
-    side = find_disk()
-    if side then return side end
-  end
+  while not side do os.pullEvent("disk"); side = find_disk() end
+  return side
 end
-
-local function card_id(side) return tostring(disk.getID(side)) end
-
-local function read_secret(side)
-  local path = fs.combine(disk.getMountPath(side), KEYFILE)
-  if not fs.exists(path) then return nil end
-  local h = fs.open(path, "r"); local s = h.readAll(); h.close()
-  return (s:gsub("%s+$", ""))
+local function card_path(side) return fs.combine(disk.getMountPath(side), CARDFILE) end
+local function read_card(side)
+  local p = card_path(side)
+  if not fs.exists(p) then return nil end
+  local h = fs.open(p, "r"); local s = h.readAll(); h.close()
+  local ok, c = pcall(textutils.unserializeJSON or function(x) return lib.json.decode(x) end, s)
+  return ok and c or nil
 end
-
--- 32 hex chars of entropy for a fresh card. CC's RNG is weak; for a real
--- deployment seed from a better source. Good enough for a high-entropy demo.
-local function gen_secret()
-  local t = {}
+local function write_card(side, card)
+  local h = fs.open(card_path(side), "w")
+  h.write((textutils.serializeJSON or lib.json.encode)(card)); h.close()
+end
+local function gen_nonce()
   math.randomseed((os.epoch and os.epoch("utc") or os.time()) + os.clock() * 1e6)
+  local t = {}
   for i = 1, 32 do t[i] = ("%x"):format(math.random(0, 15)) end
   return table.concat(t)
 end
 
-local function write_secret(side, secret)
-  local path = fs.combine(disk.getMountPath(side), KEYFILE)
-  local h = fs.open(path, "w"); h.write(secret); h.close()
+-- ---- local signer: load auth.wasm on THIS machine to sign the challenge ----
+-- (sign touches no storage, so no mesh is wired; the private key stays local.)
+local function make_signer()
+  if not fs.exists("auth.wasm") then
+    io.write("fetching auth.wasm ... ")
+    local r = assert(http.get(AUTHWASM_URL, nil, true), "cannot fetch auth.wasm")
+    local h = fs.open("auth.wasm", "wb") h.write(r.readAll()) h.close() r.close()
+    print("ok")
+  end
+  local h = fs.open("auth.wasm", "rb"); local bytes = h.readAll(); h.close()
+  io.write("loading signer (engine) ... ")
+  local w = lib.runtime.load_reactor(bytes, { mode = "transpile" })
+  print("ok")
+  local resty = { kind = "result", ok = "string", err = "string" }
+  return function(private_key, nonce)
+    local r = w:invoke(A .. "sign",
+      lib.cmval.encode_params({ "string", "string" }, { private_key, nonce }))
+    assert(r.ok, "sign abi error: " .. tostring(r.err))
+    local d = lib.cmval.decode(resty, r.result)
+    if d.is_err then error("sign: " .. tostring(d.err), 0) end
+    return d.ok
+  end
 end
 
 -- ---- subcommands -----------------------------------------------------------
@@ -99,40 +114,42 @@ if cmd == "init" then
 elseif cmd == "enroll" then
   local username = ({ ... })[2] or error("usage: cardlock enroll <username> [json-meta]", 0)
   local meta = ({ ... })[3] or "{}"
-  local side = wait_for_card("insert a BLANK floppy to enroll " .. username .. " ...")
-  local id = card_id(side)
-  local secret = read_secret(side)
-  if not secret then               -- blank card: write a fresh key
-    secret = gen_secret()
-    write_secret(side, secret)
-    disk.setLabel(side, "card:" .. username)
-  end
-  local r = enroll(username, id, secret, meta)
-  if r.is_err then error("enroll failed: " .. tostring(r.err), 0) end
-  print(("enrolled %s -> card %s"):format(username, id))
+  local r = register(username, meta)
+  if r.is_err then error("register failed: " .. tostring(r.err), 0) end
+  local cred = lib.json.decode(r.ok) -- { user_id, public_key, private_key }
+  local side = wait_for_card("insert a BLANK floppy to write " .. username .. "'s card ...")
+  write_card(side, { user_id = cred.user_id, private_key = cred.private_key })
+  pcall(disk.setLabel, side, "card:" .. username)
+  print(("enrolled %s -> user_id %s"):format(username, cred.user_id))
+  print("card written. keep it safe - the private key is only on the floppy.")
 
 else
-  -- reader / door mode
+  -- door / reader mode: needs the local signer
+  local sign = make_signer()
   print("cardlock ready - tap a card on the drive (Ctrl+T to quit)")
   while true do
     local side = wait_for_card()
-    local id = card_id(side)
-    local secret = read_secret(side)
-    if not secret then
-      print("card " .. id .. ": not provisioned (no " .. KEYFILE .. ")")
+    local card = read_card(side)
+    if not (card and card.user_id and card.private_key) then
+      print("unrecognized card (no " .. CARDFILE .. ")")
     else
-      local r = login(id, secret)
-      if r.is_err then
-        print("DENIED card " .. id .. ": " .. tostring(r.err))
+      local nonce = gen_nonce()
+      local ok, sig = pcall(sign, card.private_key, nonce)
+      if not ok then
+        print("sign error: " .. tostring(sig))
       else
-        local acct = lib.json.decode(r.ok)
-        print("WELCOME " .. tostring(acct.username) .. " (card " .. id .. ")")
-        if rs and rs.setOutput then
-          rs.setOutput(DOOR_SIDE, true); sleep(2); rs.setOutput(DOOR_SIDE, false)
+        local r = verify(card.user_id, nonce, sig)
+        if r.is_err then
+          print("DENIED (" .. card.user_id .. "): " .. tostring(r.err))
+        else
+          local acct = lib.json.decode(r.ok)
+          print("WELCOME " .. tostring(acct.username))
+          if rs and rs.setOutput then
+            rs.setOutput(DOOR_SIDE, true); sleep(2); rs.setOutput(DOOR_SIDE, false)
+          end
         end
       end
     end
-    -- debounce: wait for the card to be removed before reading again
-    while find_disk() == side do os.pullEvent("disk_eject") end
+    while find_disk() == side do os.pullEvent("disk_eject") end -- debounce
   end
 end

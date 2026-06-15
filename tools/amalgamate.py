@@ -85,5 +85,16 @@ with open("dist/crblib.lua", "w") as f:
         ["json", "cmval", "schema", "yaml", "client"],
         "-- crblib: crabcraft client runtime (amalgamated; see host/)\n"))
 
-for p in ["dist/gateway.lua", "dist/worker.lua", "dist/crb.lua", "dist/crblib.lua"]:
+# cardlib: client + LOCAL wasm runtime, for the card-reader turtle. It verifies
+# over the mesh (client) AND signs the login challenge locally (runtime), so the
+# floppy's private key never leaves the turtle. Bundles the engine bootstrap.
+with open("dist/cardlib.lua", "w") as f:
+    f.write(amalgamate(
+        'return { client = require("client"), runtime = require("runtime"), '
+        'json = require("json"), cmval = require("cmval"), schema = require("schema") }',
+        ["json", "cmval", "schema", "runtime", "client"],
+        "-- cardlib: crabcraft card-reader runtime (amalgamated; see host/)\n" + BOOTSTRAP))
+
+for p in ["dist/gateway.lua", "dist/worker.lua", "dist/crb.lua", "dist/crblib.lua",
+          "dist/cardlib.lua"]:
     print(p, os.path.getsize(p), "bytes")

@@ -2,14 +2,15 @@
 //! crabgen scaffolds this file ONCE and never overwrites it; `crabgen regen`
 //! prints any missing method signatures instead of editing it.
 //!
-//! Card-backed accounts: a ComputerCraft floppy is the "card" — its disk id is
-//! `card_id`, a random key file on it is `card_secret`. We argon2id-hash the
-//! secret (never store it) and keep users in a sqlite workload reached over the
-//! mesh. Every method takes `store`, the name of that sqlite workload, so
-//! placement stays the gateway's job (same convention as guest/caller).
+//! Public-key accounts. A ComputerCraft floppy is the "card" and carries an
+//! Ed25519 PRIVATE key; sqlite stores only the matching PUBLIC key (keyed by a
+//! random user-id), so a DB leak can neither forge nor clone a card. Login is a
+//! challenge-response: the turtle signs a fresh nonce LOCALLY with the floppy's
+//! key (via `sign`, run on the turtle so the key never leaves it) and `verify`
+//! checks the signature against the stored public key over the mesh.
 
-use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
-use argon2::{Algorithm, Argon2, Params, Version};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+
 use crab_sdk::{decode, encode_to_vec, mesh_call, Type, Value};
 
 use crate::gen::AuthImpl;
@@ -19,53 +20,57 @@ const EXEC_FN: &str = "crab:sqlite/db@0.1.0#exec";
 
 pub struct App;
 
-// ---- argon2 ---------------------------------------------------------------
+// ---- ed25519 helpers (pure, unit-testable) --------------------------------
 
-/// DEMO cost parameters. Tiny memory (256 KiB, 1 pass) so the pure-Lua
-/// wasmcraft engine can actually run the hash in-game; this is safe ONLY
-/// because a card secret is a high-entropy random key. For human-typed
-/// passwords, raise these toward OWASP guidance (m=19 MiB, t=2) and expect
-/// much slower logins on the interpreter.
-fn hasher() -> Argon2<'static> {
-    let params = Params::new(256, 1, 1, None).expect("valid argon2 params");
-    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+/// Generate a keypair: returns (user_id, public_key_hex, private_key_hex).
+/// The user-id is 8 random bytes (a friendly handle distinct from the key, so
+/// the key can rotate); the private key is the 32-byte Ed25519 seed.
+fn gen_keypair() -> Result<(String, String, String), String> {
+    let mut seed = [0u8; 32];
+    getrandom::getrandom(&mut seed).map_err(|e| format!("rng unavailable: {e}"))?;
+    let sk = SigningKey::from_bytes(&seed);
+    let pub_hex = hex::encode(sk.verifying_key().to_bytes());
+
+    let mut id = [0u8; 8];
+    getrandom::getrandom(&mut id).map_err(|e| format!("rng unavailable: {e}"))?;
+    Ok((hex::encode(id), pub_hex, hex::encode(seed)))
 }
 
-/// argon2id-hash `secret` with a fresh 16-byte random salt; returns a PHC
-/// string (encodes algorithm + params + salt + hash, so it is self-describing
-/// for verification).
-fn hash_secret(secret: &str) -> Result<String, String> {
-    let mut salt_bytes = [0u8; 16];
-    getrandom::getrandom(&mut salt_bytes).map_err(|e| format!("rng unavailable: {e}"))?;
-    let salt = SaltString::encode_b64(&salt_bytes).map_err(|e| format!("salt encode: {e}"))?;
-    let phc = hasher()
-        .hash_password(secret.as_bytes(), &salt)
-        .map_err(|e| format!("hash: {e}"))?;
-    Ok(phc.to_string())
+/// Sign `nonce` with a hex-encoded 32-byte private key; returns hex signature.
+fn sign_nonce(private_key_hex: &str, nonce: &str) -> Result<String, String> {
+    let seed: [u8; 32] = hex::decode(private_key_hex)
+        .map_err(|e| format!("bad private key hex: {e}"))?
+        .try_into()
+        .map_err(|_| "private key must be 32 bytes".to_string())?;
+    let sk = SigningKey::from_bytes(&seed);
+    Ok(hex::encode(sk.sign(nonce.as_bytes()).to_bytes()))
 }
 
-/// Constant-time verify of `secret` against a stored PHC string. Params come
-/// from the PHC itself, so a default Argon2 verifies any of our records.
-fn verify_secret(secret: &str, phc: &str) -> bool {
-    match PasswordHash::new(phc) {
-        Ok(parsed) => Argon2::default()
-            .verify_password(secret.as_bytes(), &parsed)
-            .is_ok(),
-        Err(_) => false,
-    }
+/// Verify a hex signature of `nonce` against a hex public key.
+fn verify_sig(public_key_hex: &str, nonce: &str, signature_hex: &str) -> Result<(), String> {
+    let pk: [u8; 32] = hex::decode(public_key_hex)
+        .map_err(|e| format!("bad public key hex: {e}"))?
+        .try_into()
+        .map_err(|_| "public key must be 32 bytes".to_string())?;
+    let sig: [u8; 64] = hex::decode(signature_hex)
+        .map_err(|e| format!("bad signature hex: {e}"))?
+        .try_into()
+        .map_err(|_| "signature must be 64 bytes".to_string())?;
+    let vk = VerifyingKey::from_bytes(&pk).map_err(|e| format!("bad public key: {e}"))?;
+    vk.verify(nonce.as_bytes(), &Signature::from_bytes(&sig))
+        .map_err(|_| "signature does not verify".to_string())
 }
 
 // ---- sqlite over the mesh -------------------------------------------------
 
 /// Single-quote a value for inline SQL (sqlite `exec` takes a raw statement,
-/// not bound params, so we escape `'` by doubling it).
+/// not bound params, so we escape `'` by doubling it). Keys/ids are hex, but
+/// username/meta are user-supplied.
 fn q(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
 /// Run one SQL statement on the `store` workload and return its JSON reply.
-/// A SQL-level error arrives as the sqlite result err case and surfaces here
-/// as `Err`; transport failures do too.
 fn exec(store: &str, sql: &str) -> Result<String, String> {
     let params = encode_to_vec(&Value::String(sql.to_string()));
     let reply = mesh_call(store, EXEC_FN, &params)?;
@@ -80,6 +85,15 @@ fn exec(store: &str, sql: &str) -> Result<String, String> {
     }
 }
 
+/// Extract the single string cell at `col` from row 0 of a sqlite reply.
+/// `None` = no rows (unknown user).
+fn cell(reply: &serde_json::Value, col: usize) -> Option<String> {
+    reply.get("rows")?.as_array()?.first()?.as_array()?
+        .get(col)?
+        .as_str()
+        .map(|s| s.to_string())
+}
+
 // ---- the exported interface ----------------------------------------------
 
 impl AuthImpl for App {
@@ -88,92 +102,75 @@ impl AuthImpl for App {
         exec(
             &store,
             "CREATE TABLE IF NOT EXISTS users(\
-                card_id TEXT PRIMARY KEY, \
+                user_id TEXT PRIMARY KEY, \
+                pubkey TEXT NOT NULL, \
                 username TEXT NOT NULL, \
-                phc TEXT NOT NULL, \
                 meta TEXT NOT NULL DEFAULT '{}')",
         )?;
         Ok(())
     }
 
-    /// crab:auth/accounts@0.1.0#enroll-card — hash the secret and insert.
-    fn enroll_card(
-        &self,
-        store: String,
-        username: String,
-        card_id: String,
-        card_secret: String,
-        meta: String,
-    ) -> Result<(), String> {
-        if username.is_empty() || card_id.is_empty() || card_secret.is_empty() {
-            return Err("username, card-id and card-secret are required".into());
+    /// crab:auth/accounts@0.1.0#register — keypair + store pubkey, return privkey once.
+    fn register(&self, store: String, username: String, meta: String) -> Result<String, String> {
+        if username.is_empty() {
+            return Err("username is required".into());
         }
-        let phc = hash_secret(&card_secret)?;
+        let (user_id, pub_hex, priv_hex) = gen_keypair()?;
         let meta = if meta.is_empty() { "{}" } else { &meta };
         let sql = format!(
-            "INSERT INTO users(card_id, username, phc, meta) VALUES({}, {}, {}, {})",
-            q(&card_id),
+            "INSERT INTO users(user_id, pubkey, username, meta) VALUES({}, {}, {}, {})",
+            q(&user_id),
+            q(&pub_hex),
             q(&username),
-            q(&phc),
             q(meta),
         );
-        exec(&store, &sql).map_err(|e| {
-            if e.contains("UNIQUE") || e.contains("constraint") {
-                "card already enrolled".into()
-            } else {
-                e
-            }
-        })?;
-        Ok(())
+        exec(&store, &sql)?;
+        Ok(serde_json::json!({
+            "user_id": user_id,
+            "public_key": pub_hex,
+            "private_key": priv_hex,
+        })
+        .to_string())
     }
 
-    /// crab:auth/accounts@0.1.0#login-card — look up the card, verify the
-    /// secret, and return the account as JSON. Unknown card and wrong secret
-    /// return the SAME error so the client can't probe which cards exist.
-    fn login_card(
+    /// crab:auth/accounts@0.1.0#sign — sign a nonce locally (no storage). Run
+    /// this on the turtle so the private key never crosses the network.
+    fn sign(&self, private_key: String, nonce: String) -> Result<String, String> {
+        sign_nonce(&private_key, &nonce)
+    }
+
+    /// crab:auth/accounts@0.1.0#verify — check a signature against the stored
+    /// public key. Unknown user and bad signature both return "access denied".
+    fn verify(
         &self,
         store: String,
-        card_id: String,
-        card_secret: String,
+        user_id: String,
+        nonce: String,
+        signature: String,
     ) -> Result<String, String> {
         let sql = format!(
-            "SELECT username, phc, meta FROM users WHERE card_id = {}",
-            q(&card_id),
+            "SELECT pubkey, username, meta FROM users WHERE user_id = {}",
+            q(&user_id),
         );
-        let json = exec(&store, &sql)?;
-        account_from_reply(&json, &card_secret)
+        let reply: serde_json::Value =
+            serde_json::from_str(&exec(&store, &sql)?).map_err(|e| format!("parse reply: {e}"))?;
+
+        // Unknown user -> "access denied" (don't reveal which ids exist).
+        let pubkey = cell(&reply, 0).ok_or("access denied")?;
+        let username = cell(&reply, 1).unwrap_or_default();
+        let meta = cell(&reply, 2).unwrap_or_else(|| "{}".into());
+
+        verify_sig(&pubkey, &nonce, &signature).map_err(|_| "access denied".to_string())?;
+
+        let meta_val: serde_json::Value =
+            serde_json::from_str(&meta).unwrap_or_else(|_| serde_json::Value::String(meta.clone()));
+        Ok(serde_json::json!({
+            "user_id": user_id,
+            "username": username,
+            "meta": meta_val,
+        })
+        .to_string())
     }
-}
-
-/// Pure half of `login_card`: given sqlite's JSON reply for the card lookup and
-/// the presented secret, verify it and produce the account JSON. Factored out
-/// so it is unit-testable without the mesh. Unknown card and wrong secret both
-/// return "invalid card" so the client can't probe which cards exist.
-fn account_from_reply(json: &str, card_secret: &str) -> Result<String, String> {
-    let reply: serde_json::Value =
-        serde_json::from_str(json).map_err(|e| format!("parse sqlite reply: {e}"))?;
-    let rows = reply
-        .get("rows")
-        .and_then(|r| r.as_array())
-        .ok_or("sqlite reply missing rows")?;
-
-    let row = rows
-        .first()
-        .and_then(|r| r.as_array())
-        .ok_or("invalid card")?;
-    let username = row.first().and_then(|c| c.as_str()).unwrap_or("");
-    let phc = row.get(1).and_then(|c| c.as_str()).unwrap_or("");
-    let meta = row.get(2).and_then(|c| c.as_str()).unwrap_or("{}");
-
-    if !verify_secret(card_secret, phc) {
-        return Err("invalid card".into());
-    }
-
-    // meta is stored as a JSON string; re-embed it as JSON (fall back to a
-    // plain string if it isn't valid JSON) so callers get one object.
-    let meta_val: serde_json::Value =
-        serde_json::from_str(meta).unwrap_or_else(|_| serde_json::Value::String(meta.into()));
-    Ok(serde_json::json!({ "username": username, "meta": meta_val }).to_string())
 }
 
 #[cfg(test)]
@@ -181,39 +178,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn argon2_round_trip() {
-        let phc = hash_secret("s3cret-card-key").unwrap();
-        assert!(phc.starts_with("$argon2id$"), "PHC string: {phc}");
-        assert!(verify_secret("s3cret-card-key", &phc));
-        assert!(!verify_secret("wrong-key", &phc));
-        // a fresh salt each time => different PHC strings for the same secret
-        assert_ne!(phc, hash_secret("s3cret-card-key").unwrap());
+    fn keypair_sign_verify_round_trip() {
+        let (user_id, pub_hex, priv_hex) = gen_keypair().unwrap();
+        assert_eq!(user_id.len(), 16); // 8 bytes hex
+        assert_eq!(pub_hex.len(), 64); // 32 bytes hex
+        assert_eq!(priv_hex.len(), 64);
+
+        let nonce = "challenge-12345";
+        let sig = sign_nonce(&priv_hex, nonce).unwrap();
+        assert_eq!(sig.len(), 128); // 64 bytes hex
+        assert!(verify_sig(&pub_hex, nonce, &sig).is_ok());
+    }
+
+    #[test]
+    fn verify_rejects_tampering() {
+        let (_id, pub_hex, priv_hex) = gen_keypair().unwrap();
+        let sig = sign_nonce(&priv_hex, "nonce-A").unwrap();
+
+        // wrong nonce (replay of a sig for a different challenge) fails
+        assert!(verify_sig(&pub_hex, "nonce-B", &sig).is_err());
+        // a different keypair's public key fails
+        let (_id2, other_pub, _p2) = gen_keypair().unwrap();
+        assert!(verify_sig(&other_pub, "nonce-A", &sig).is_err());
+        // a flipped signature byte fails
+        let mut bad = sig.clone();
+        bad.replace_range(0..2, if &sig[0..2] == "00" { "ff" } else { "00" });
+        assert!(verify_sig(&pub_hex, "nonce-A", &bad).is_err());
+    }
+
+    #[test]
+    fn verify_sig_rejects_malformed_hex() {
+        let (_id, pub_hex, priv_hex) = gen_keypair().unwrap();
+        let sig = sign_nonce(&priv_hex, "x").unwrap();
+        assert!(verify_sig("not-hex", "x", &sig).is_err());
+        assert!(verify_sig(&pub_hex, "x", "deadbeef").is_err()); // wrong length
     }
 
     #[test]
     fn sql_escaping_doubles_quotes() {
         assert_eq!(q("o'brien"), "'o''brien'");
-        assert_eq!(q("plain"), "'plain'");
-    }
-
-    #[test]
-    fn login_parses_reply_and_verifies() {
-        let phc = hash_secret("key-123").unwrap();
-        let reply = serde_json::json!({
-            "columns": ["username", "phc", "meta"],
-            "rows": [["alice", phc, "{\"role\":\"admin\"}"]],
-            "changes": 0
-        })
-        .to_string();
-
-        let out = account_from_reply(&reply, "key-123").unwrap();
-        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(v["username"], "alice");
-        assert_eq!(v["meta"]["role"], "admin");
-
-        // wrong secret and unknown card both report the same thing
-        assert_eq!(account_from_reply(&reply, "nope").unwrap_err(), "invalid card");
-        let empty = serde_json::json!({"columns":[],"rows":[],"changes":0}).to_string();
-        assert_eq!(account_from_reply(&empty, "key-123").unwrap_err(), "invalid card");
     }
 }
