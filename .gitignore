@@ -4,3 +4,5 @@ __pycache__/
 guest/sqlite-c/sqlite3.c
 .worktrees/
 node_modules/
+test/vendor/
+/cardui-build/
