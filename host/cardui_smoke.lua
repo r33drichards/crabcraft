@@ -71,17 +71,38 @@ local function check(desc, cond)
   if cond then passed = passed + 1; print("ok   " .. desc)
   else failed = failed + 1; print("FAIL " .. desc) end
 end
--- draw protocol text line: "T x y fg bg <text>"; return 0-based x,y of the first
--- line containing `sub` (loose on the colour fields so it survives format tweaks).
-local function find_cell(fr, sub)
+-- The engine emits one "T x y fg bg <text>" line per inline word run, so a
+-- button like "[ Sign in ]" becomes four runs and a phrase is never contiguous.
+-- rows() lists every run; visible() rejoins their text for phrase assertions;
+-- find_button() returns the 0-based cell of `w1` on a row that also holds `w2`.
+local function rows(fr)
+  local r = {}
   for line in (fr .. "\n"):gmatch("([^\n]*)\n") do
-    local x, y = line:match("^T (%d+) (%d+) ")
-    if x and line:find(sub, 1, true) then return tonumber(x), tonumber(y) end
+    local x, y, rest = line:match("^T (%d+) (%d+) %d+ %d+ (.*)$")
+    if x then r[#r + 1] = { x = tonumber(x), y = tonumber(y), t = rest } end
+  end
+  return r
+end
+local function visible(fr)
+  local out = {}
+  for _, run in ipairs(rows(fr)) do out[#out + 1] = run.t end
+  return table.concat(out, " ")
+end
+local function find_button(fr, w1, w2)
+  local rs = rows(fr)
+  for _, a in ipairs(rs) do
+    if a.t:find(w1, 1, true) then
+      if not w2 then return a.x, a.y end
+      for _, b in ipairs(rs) do
+        if b.y == a.y and b.t:find(w2, 1, true) then return a.x, a.y end
+      end
+    end
   end
 end
+local function shows(fr, sub) return visible(fr):find(sub, 1, true) ~= nil end
 
-check("first frame renders LOCKED", f0:find("LOCKED", 1, true) ~= nil)
-if not f0:find("LOCKED", 1, true) then
+check("first frame renders LOCKED", shows(f0, "LOCKED"))
+if not shows(f0, "LOCKED") then
   print(("%d/%d assertions passed"):format(passed, passed + failed)); print("FAILED"); return
 end
 
@@ -105,44 +126,44 @@ local core = core_factory({
   door = function() door_pulses = door_pulses + 1 end,
 })
 
--- simulate a 1-based monitor tap on the cell holding `label` in frame `fr`
-local function tap(fr, label)
-  local x, y = find_cell(fr, label)
-  assert(x, "button not found in frame: " .. label)
+-- simulate a 1-based monitor tap on the button identified by word(s) in frame fr
+local function tap(fr, w1, w2)
+  local x, y = find_button(fr, w1, w2)
+  assert(x, "button not found in frame: " .. w1 .. (w2 and (" " .. w2) or ""))
   core.on_tap(x + 1, y + 1)
   return frame()
 end
 
 -- 1. sign in -> await card (React flips to awaitcard; host pushes status note)
-local f1 = tap(f0, "Sign in")
-check("tap Sign in -> await-card prompt", f1:find("Tap your card", 1, true) ~= nil)
+local f1 = tap(f0, "Sign", "in")
+check("tap Sign in -> await-card prompt", shows(f1, "Tap your card"))
 
 -- 2. card present, mesh verify granted -> Welcome + door pulse
 fake.verify_result = { is_err = false,
   ok = json.encode({ user_id = "u1", username = "alice", meta = { role = "admin" } }) }
 core.on_disk("right"); local f2 = frame()
-check("granted -> Welcome alice", f2:find("Welcome", 1, true) ~= nil and f2:find("alice", 1, true) ~= nil)
+check("granted -> Welcome alice", shows(f2, "Welcome") and shows(f2, "alice"))
 check("granted pulses the door", door_pulses == 1)
 
 -- 3. relock, sign in again, mesh verify denied -> DENIED
 local fl = tap(f2, "Lock")
-check("Lock -> back to LOCKED", fl:find("LOCKED", 1, true) ~= nil)
-local f3 = tap(fl, "Sign in")
-check("re sign-in -> await card again", f3:find("Tap your card", 1, true) ~= nil)
+check("Lock -> back to LOCKED", shows(fl, "LOCKED"))
+local f3 = tap(fl, "Sign", "in")
+check("re sign-in -> await card again", shows(f3, "Tap your card"))
 fake.verify_result = { is_err = true, err = "access denied" }
 core.on_disk("right"); local f4 = frame()
-check("denied -> DENIED frame", f4:find("DENIED", 1, true) ~= nil)
+check("denied -> DENIED frame", shows(f4, "DENIED"))
 
 -- 4. sign up -> enroll -> write card (register_result set BEFORE the tap, since
 --    handle(signup) registers synchronously during on_tap)
 local fl2 = tap(f4, "Back")
-check("DENIED Back -> LOCKED", fl2:find("LOCKED", 1, true) ~= nil)
+check("DENIED Back -> LOCKED", shows(fl2, "LOCKED"))
 fake.register_result = { is_err = false,
   ok = json.encode({ user_id = "7c12", public_key = "pk", private_key = "sk" }) }
-local f5 = tap(fl2, "Sign up")
-check("sign up -> Enrolling prompt", f5:find("Enrolling", 1, true) ~= nil)
+local f5 = tap(fl2, "Sign", "up")
+check("sign up -> Enrolling prompt", shows(f5, "Enrolling"))
 core.on_disk("right"); local f6 = frame()
-check("enrolled -> shows user_id 7c12", f6:find("7c12", 1, true) ~= nil)
+check("enrolled -> shows user_id 7c12", shows(f6, "7c12"))
 check("enrolled wrote the card", fake.written ~= nil and fake.written.user_id == "7c12")
 
 print(("%d/%d assertions passed"):format(passed, passed + failed))
