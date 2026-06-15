@@ -1,0 +1,39 @@
+// crabcraft auth workload: public-key user accounts. A ComputerCraft floppy is
+// the "card" and carries an Ed25519 PRIVATE key; the server stores only the
+// matching PUBLIC key, so a database leak can't forge or clone a card.
+//
+// Login is a challenge-response: the relying party (a turtle/computer with the
+// disk drive) picks a fresh random nonce, signs it LOCALLY with the floppy's
+// private key (run `sign` on the turtle via the wasmcraft engine so the key
+// never crosses the network), and asks `verify` to check the signature against
+// the stored public key. A sniffed (nonce, signature) pair can't be replayed.
+//
+// `store` names the sqlite workload holding the users table (placement is the
+// gateway's job, so the caller passes the name — same convention as caller).
+package crab:auth@0.1.0;
+
+interface accounts {
+  /// Create the users table on `store` if absent. Idempotent.
+  init: func(store: string) -> result<_, string>;
+
+  /// Register a user: generate an Ed25519 keypair, store the PUBLIC key with
+  /// the user info, and return JSON {"user_id","public_key","private_key"}.
+  /// The private key (hex) is returned ONCE to write to the floppy and is
+  /// never stored.
+  register: func(store: string, username: string, meta: string) -> result<string, string>;
+
+  /// Sign `nonce` with a floppy's `private-key` (hex), returning the signature
+  /// (hex). Pure crypto, touches no storage — run this LOCALLY on the turtle
+  /// so the private key never leaves it.
+  sign: func(private-key: string, nonce: string) -> result<string, string>;
+
+  /// Verify that `signature` (hex) is a valid Ed25519 signature of `nonce` by
+  /// `user-id`, against the stored public key. Returns the account JSON
+  /// {"user_id","username","meta"} on success; the err case is "access denied"
+  /// for both unknown users and bad signatures (no enumeration).
+  verify: func(store: string, user-id: string, nonce: string, signature: string) -> result<string, string>;
+}
+
+world auth {
+  export accounts;
+}

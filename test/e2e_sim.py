@@ -40,6 +40,8 @@ CPP_WASM = slurp("modules/hello-cpp.wasm", binary=True) if os.path.exists("modul
 CPP_SCHEMA = slurp("guest/hello-cpp/gen/schema.json") if os.path.exists("guest/hello-cpp/gen/schema.json") else None
 TS_WASM = slurp("modules/hello-ts.wasm", binary=True) if os.path.exists("modules/hello-ts.wasm") else None
 TS_SCHEMA = slurp("guest/hello-ts/gen/schema.json") if os.path.exists("guest/hello-ts/gen/schema.json") else None
+AUTH_WASM = slurp("modules/auth.wasm", binary=True) if os.path.exists("modules/auth.wasm") else None
+AUTH_SCHEMA = slurp("guest/auth/gen/schema.json") if os.path.exists("guest/auth/gen/schema.json") else None
 
 B64 = '''
 local function b64dec(data)
@@ -138,6 +140,8 @@ def default_worker_bins(label):
         bins["hello-go.wasm"] = GO_WASM
     if SQLITE_WASM and label == "w1":
         bins["sqlite.wasm"] = SQLITE_WASM
+    if AUTH_WASM and label == "w2":
+        bins["auth.wasm"] = AUTH_WASM
     if CPP_WASM and label == "w2":
         bins["hello-cpp.wasm"] = CPP_WASM
     if TS_WASM and label == "w1":
@@ -176,6 +180,34 @@ emit('sqlite create ok: ' .. tostring(r1.is_ok == true))
 emit('sqlite select: ' .. tostring(r3.is_ok and r3.ok))
 local r4 = db.exec({{ sql = "NOT SQL" }})
 emit('sqlite bad sql errs: ' .. tostring(r4.is_err == true))
+"""
+
+auth_test = ""
+if AUTH_WASM and SQLITE_WASM:
+    auth_test = f"""
+-- PUBLIC-KEY AUTH: register -> sign -> verify, with auth mesh-calling sqlite
+-- (two-hop mesh: client -> auth -> sqlite). In production the turtle runs
+-- `sign` LOCALLY so the private key never leaves it; here the client calls the
+-- deployed sign to exercise the Ed25519 crypto on a worker in-sim.
+r = C:deploy({{ name = 'auth', wasm = 'file:auth.wasm', kind = 'reactor',
+  schema = {lua_str(AUTH_SCHEMA)} }})
+emit('deploy auth: ' .. tostring(r.ok))
+wait_running('auth')
+local auth = C:workload('auth')
+emit('auth init ok: ' .. tostring(auth['init']({{ store = 'sqlite' }}).is_ok == true))
+local reg = auth['register']({{ store = 'sqlite', username = 'alice', meta = '{{"role":"admin"}}' }})
+emit('auth register ok: ' .. tostring(reg.is_ok == true))
+local cred = require('json').decode(reg.ok)
+local nonce = 'nonce-deadbeef'
+local sg = auth['sign']({{ ['private-key'] = cred.private_key, nonce = nonce }})
+emit('auth sign ok: ' .. tostring(sg.is_ok == true and #sg.ok == 128))
+local ver = auth['verify']({{ store = 'sqlite', ['user-id'] = cred.user_id,
+  nonce = nonce, signature = sg.ok }})
+emit('auth verify(valid): ' .. tostring(ver.is_ok == true and
+  require('json').decode(ver.ok).username == 'alice'))
+local bad = auth['verify']({{ store = 'sqlite', ['user-id'] = cred.user_id,
+  nonce = 'other-nonce', signature = sg.ok }})
+emit('auth verify(replay) denied: ' .. tostring(bad.is_err == true))
 """
 
 go_test = ""
@@ -248,6 +280,7 @@ emit('greet: ' .. tostring(hello.greet({{ name = 'crab', excited = true }})))
 emit('add: ' .. tostring(hello.add({{ a = 40, b = 2 }})))
 {caller_test}
 {sqlite_test}
+{auth_test}
 {go_test}
 {cpp_test}
 {ts_test}
@@ -359,6 +392,12 @@ def main():
     if SQLITE_WASM:
         checks.append(("SQLite C lane + volume", '"rows":[["ferris"],["gopher"]]' in client_out
                        and "sqlite bad sql errs: true" in client_out))
+    if AUTH_WASM and SQLITE_WASM:
+        checks.append(("PK auth register+sign+verify (2-hop mesh)",
+                       "auth register ok: true" in client_out
+                       and "auth sign ok: true" in client_out
+                       and "auth verify(valid): true" in client_out
+                       and "auth verify(replay) denied: true" in client_out))
     failed = [name for name, ok in checks if not ok]
     for name, ok in checks:
         print(("PASS " if ok else "FAIL ") + name)
