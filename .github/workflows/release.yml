@@ -29,6 +29,7 @@ jobs:
           # single source of truth; wit/hello.json is only an ir.rs fixture)
           cp guest/hello/gen/schema.json out/hello.json
           cp guest/hello-go/gen/schema.json out/hello-go.json
+          cp guest/auth/gen/schema.json out/auth.json
           (cd out && sha256sum * > SHA256SUMS)
           ls -la out
 

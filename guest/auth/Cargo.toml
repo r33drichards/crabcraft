@@ -1,0 +1,26 @@
+# crabcraft guest crate (Rust lane), scaffolded by crabgen. Written once and
+# never overwritten — but note: if the WIT later GAINS imports, add
+# `features = ["mesh"]` to the crab-sdk dependency (regen will remind you).
+[package]
+name = "auth"
+version = "0.1.0"
+edition = "2021"
+description = "crabcraft guest module: crab:auth/api@0.1.0"
+
+# cdylib is the deployed wasm reactor; rlib lets `cargo test` build the
+# host-side unit tests in src/app.rs (the wasm artifact is still the cdylib).
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# mesh: this guest reaches the sqlite workload via crabcraft.call (mesh_call).
+# The WIT itself declares no import (we address sqlite by raw function string,
+# like guest/caller), so enable the feature explicitly.
+crab-sdk = { path = "../crab-sdk", features = ["mesh"] }
+# argon2id for hashing the card secret; it re-exports password_hash for the
+# PHC encoder + constant-time verifier. Pure Rust, no SIMD.
+argon2 = "0.5"
+# random salt source on wasm32-wasip1 (WASI random_get).
+getrandom = "0.2"
+# parse the sqlite workload's JSON reply ({"columns":..,"rows":..,"changes":..}).
+serde_json = "1"

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["guest/crab-sdk", "guest/hello", "guest/caller", "tools/crabgen"]
+members = ["guest/auth", "guest/crab-sdk", "guest/hello", "guest/caller", "tools/crabgen"]
 
 # Small wasm: the hello module targets <400KB.
 [profile.release]

@@ -1,0 +1,4 @@
+name: auth
+wasm: https://github.com/r33drichards/crabcraft/releases/latest/download/auth.wasm
+kind: reactor
+schema: https://github.com/r33drichards/crabcraft/releases/latest/download/auth.json

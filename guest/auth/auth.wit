@@ -1,0 +1,28 @@
+// crabcraft auth workload: card-backed user accounts with argon2-hashed
+// secrets, stored in a sqlite workload reached over the mesh (crabcraft.call).
+//
+// The "card" is a ComputerCraft floppy: its disk id is `card-id` and a random
+// key file on it is `card-secret`. The secret plays the password role, so we
+// argon2id-hash it (never store it) and verify on swipe. `store` names the
+// sqlite workload that holds the users table (placement is the gateway's job,
+// so the caller passes the name rather than us baking one in).
+package crab:auth@0.1.0;
+
+interface accounts {
+  /// Create the users table on `store` if it does not exist. Idempotent.
+  init: func(store: string) -> result<_, string>;
+
+  /// Enroll a card. argon2id-hashes `card-secret` and stores it with the
+  /// owner `username`, the `card-id` (primary key), and an opaque `meta`
+  /// JSON blob. Fails if the card is already enrolled.
+  enroll-card: func(store: string, username: string, card-id: string, card-secret: string, meta: string) -> result<_, string>;
+
+  /// Verify a presented card. On success returns the account as a JSON
+  /// string {"username":...,"meta":...}; the err case is an auth failure
+  /// (unknown card or wrong secret) the client can surface as "denied".
+  login-card: func(store: string, card-id: string, card-secret: string) -> result<string, string>;
+}
+
+world auth {
+  export accounts;
+}
