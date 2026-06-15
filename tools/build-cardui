@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Bundle the cardui React app (web/cardui/main.jsx + React + react-reconciler)
+# into a single self-contained cardapp.js that the wasmcraft web engine runs
+# through QuickJS. This is the only step that needs Node — it happens at BUILD
+# time on a dev machine; nothing here ships to ComputerCraft except the
+# resulting cardapp.js.
+#
+#   Usage:  tools/build-cardui [entry.jsx] [out.js]
+#           defaults: web/cardui/main.jsx -> web/site/cardapp.js
+#
+# React renders through a custom react-reconciler host config (web/cardui/
+# main.jsx), not react-dom, so it targets the engine's small DOM directly.
+#
+# npm >= 11 notes: (a) `npm init -y` rejects a dotted dir name, so we use a
+# non-dotted build dir (cardui-build/) and write package.json ourselves with a
+# valid name; (b) npm 11 won't run dependency install scripts unless asked, so
+# we drop an .npmrc enabling pre/post scripts and pass --foreground-scripts so
+# esbuild's native binary is installed.
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+ENTRY="${1:-web/cardui/main.jsx}"
+OUT="${2:-web/site/cardapp.js}"
+BUILD="$ROOT/cardui-build"
+
+command -v npm >/dev/null || { echo "npm not found — Node is required to bundle the React app"; exit 1; }
+
+# install the toolchain once into a throwaway dir (kept out of git)
+if [ ! -d "$BUILD/node_modules/esbuild" ]; then
+  echo "== installing react + react-reconciler + esbuild =="
+  mkdir -p "$BUILD"
+  # write a minimal, valid package.json (npm 11 rejects `npm init -y` here
+  # because the dir name would seed an invalid "name")
+  cat > "$BUILD/package.json" <<'JSON'
+{
+  "name": "cardui-build",
+  "version": "0.0.0",
+  "private": true
+}
+JSON
+  # let dependency install scripts run under npm 11 (esbuild fetches its native
+  # binary from a postinstall step)
+  printf 'enable-pre-post-scripts=true\n' > "$BUILD/.npmrc"
+  # the registry can be flaky on first contact — retry a few times
+  ok=0
+  for attempt in 1 2 3 4; do
+    if ( cd "$BUILD" && npm install --no-audit --no-fund --foreground-scripts react@18 react-reconciler@0.29 esbuild ); then ok=1; break; fi
+    echo "npm install failed (attempt $attempt) — retrying"; sleep $((attempt * 2))
+  done
+  [ "$ok" = 1 ] || { echo "npm install failed after retries"; exit 1; }
+fi
+
+# bundle from inside the build dir so `react`/`react-reconciler` resolve from its
+# node_modules; the app sources are copied in next to them.
+echo "== bundling $ENTRY -> $OUT =="
+rm -rf "$BUILD/app"; mkdir -p "$BUILD/app"
+cp web/cardui/*.jsx "$BUILD/app/" 2>/dev/null || true
+mkdir -p "$(dirname "$OUT")"
+OUT_ABS="$(cd "$(dirname "$OUT")" && pwd)/$(basename "$OUT")"
+( cd "$BUILD" && ./node_modules/.bin/esbuild "app/$(basename "$ENTRY")" \
+    --bundle --format=iife --jsx=automatic \
+    --define:process.env.NODE_ENV='"production"' \
+    --outfile="$OUT_ABS" )
+echo "== wrote $OUT ($(wc -c < "$OUT") bytes) =="
