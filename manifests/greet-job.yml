@@ -1,0 +1,17 @@
+# A CronJob (docs/WIRE.md section 6): every minute, run one typed greet()
+# call on the hello module and record the result.
+#   crb deploy greet-job.yml
+#   crb logs greet-job        -- run history (status, timing, decoded output)
+#   crb run greet-job         -- queue an extra run right now
+# Drop `schedule:` for a one-shot job (runs once at deploy, like k8s Jobs).
+name: greet-job
+wasm: https://github.com/r33drichards/crabcraft/releases/latest/download/hello.wasm
+kind: job
+schema: https://github.com/r33drichards/crabcraft/releases/latest/download/hello.json
+func: greet
+args:
+  name: crabcraft
+  excited: true
+schedule: "@every 1m"
+keep-warm: true   # hold the slot (and the transpiled module) between runs
+retries: 1

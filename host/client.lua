@@ -73,7 +73,13 @@ function M.connect(gwname, opts)
   function C:list() return self:request({ type = "list" }) end
   function C:deploy(spec) return self:request({ type = "deploy", name = spec.name,
     url = spec.wasm or spec.url, kind = spec.kind, schema = spec.schema,
-    warm = spec.warm, force = spec.force, args = spec.args, body_file = spec.body_file }) end
+    warm = spec.warm, force = spec.force, args = spec.args, body_file = spec.body_file,
+    -- job kind (WIRE.md section 6); params must be pre-encoded for func jobs
+    module = spec.module, func = spec.func, params = spec.params, body = spec.body,
+    schedule = spec.schedule, retries = spec.retries, timeout = spec.timeout,
+    keep = spec.keep }) end
+  function C:run(name) return self:request({ type = "run", name = name }) end
+  function C:job_logs(name) return self:request({ type = "job-logs", name = name }) end
   function C:remove(name) return self:request({ type = "remove", name = name }) end
   function C:schema(name)
     local r = self:request({ type = "schema", name = name })
